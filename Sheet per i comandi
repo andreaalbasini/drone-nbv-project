@@ -1,0 +1,31 @@
+Comandi per lanciare gazebo :
+
+cd ~/Documents/Progetto_Drone/PX4-Autopilot
+make px4_sitl gazebo
+
+
+Per lanciare l'agente:
+
+cd ~/Documents/Progetto_Drone/Micro-XRCE-DDS-Agent/build/
+./MicroXRCEAgent udp4 -p 8888
+
+
+Per lanciare il docker:
+
+docker run -it \
+  --net=host \
+  --name ros2_px4 \
+  -v ~/Documents/Progetto_Drone:/ws_host \
+  -w /ws_host \
+  osrf/ros:humble-desktop
+
+NOTA == 
+
+Se metti --rm, quando chiudi il terminale il container viene distrutto.
+
+Senza --rm, rimane attivo.
+
+
+Per aprire un nuovo terminale nel docker :
+
+docker exec -it ros2_px4 bash

@@ -1,0 +1,39 @@
+# ===== Grandi dipendenze esterne =====
+PX4-Autopilot/
+Micro-XRCE-DDS-Agent/
+
+# ===== Build ROS 2 =====
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# ===== Log ROS / PX4 / temporanei =====
+.ros/
+*.log
+*.ulg
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== Editor / IDE =====
+.vscode/
+.idea/
+
+# ===== Sistema =====
+.DS_Store
+Thumbs.db
+
+# ===== File temporanei =====
+*~
+*.tmp
+*.swp
+*.swo
+
+# ===== Cartelle create per errore =====
+--net=host
+-v
+-w
+ros2_ws/src/px4_msgs/
+ros2_ws/src/px4_ros_com/
