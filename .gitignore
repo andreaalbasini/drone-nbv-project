@@ -37,3 +37,6 @@ Thumbs.db
 -w
 ros2_ws/src/px4_msgs/
 ros2_ws/src/px4_ros_com/
+
+PX4-Autopilot/
+Micro-XRCE-DDS-Agent/
