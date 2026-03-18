@@ -1,40 +1,51 @@
 #!/usr/bin/env python3
 
 import math
-import signal
-import sys
-import threading
-import termios
-import tty
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Bool
+
 from px4_msgs.msg import OffboardControlMode
 from px4_msgs.msg import TrajectorySetpoint
 from px4_msgs.msg import VehicleCommand
+from px4_msgs.msg import VehicleOdometry
 
 
 class OffboardController(Node):
     def __init__(self):
         super().__init__('offboard_controller')
 
-        # Parametri di fallback iniziali
-        self.declare_parameter('target_x', 0.0)
-        self.declare_parameter('target_y', 0.0)
-        self.declare_parameter('target_z', -5.0)
-        self.declare_parameter('target_yaw', 0.0)
+        # Target
+        self.target_x = 0.0
+        self.target_y = 0.0
+        self.target_z = 0.0
+        self.target_yaw = 0.0
+        self.has_received_target = False
 
-        self.target_x = float(self.get_parameter('target_x').value)
-        self.target_y = float(self.get_parameter('target_y').value)
-        self.target_z = float(self.get_parameter('target_z').value)
-        self.target_yaw = float(self.get_parameter('target_yaw').value)
+        # Stato attuale da odometry
+        self.current_x = 0.0
+        self.current_y = 0.0
+        self.current_z = 0.0
+        self.current_vx = 0.0
+        self.current_vy = 0.0
+        self.current_vz = 0.0
+        self.has_odometry = False
 
-        self.get_logger().info(
-            f'Target iniziale: x={self.target_x}, y={self.target_y}, z={self.target_z}, yaw={self.target_yaw}'
-        )
+        # Goal check
+        self.goal_tolerance = 0.30
+        self.velocity_tolerance = 0.20
+        self.goal_reached = False
+        self.goal_reached_reported = False
 
+        # Debug log ogni 1 secondo
+        self.last_debug_time_ns = 0
+        self.debug_period_ns = int(1.0 * 1e9)
+
+        # Publisher PX4
         self.offboard_control_mode_publisher = self.create_publisher(
             OffboardControlMode,
             '/fmu/in/offboard_control_mode',
@@ -53,11 +64,35 @@ class OffboardController(Node):
             10
         )
 
-        self.target_pose_subscriber = self.create_subscription(
-            PoseStamped,
-            '/whale_nbv/target_pose',
-            self.target_pose_callback,
+        # Publisher stato missione
+        self.goal_reached_publisher = self.create_publisher(
+            Bool,
+            '/whale_nbv/goal_reached',
             10
+        )
+
+        # Subscriber goal
+        self.goal_pose_subscriber = self.create_subscription(
+            PoseStamped,
+            '/whale_nbv/goal_pose',
+            self.goal_pose_callback,
+            10
+        )
+
+        # QoS corretto per topic PX4 /fmu/out/*
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
+        # Subscriber odometry
+        self.vehicle_odometry_subscriber = self.create_subscription(
+            VehicleOdometry,
+            '/fmu/out/vehicle_odometry',
+            self.vehicle_odometry_callback,
+            qos_profile
         )
 
         self.timer = self.create_timer(0.1, self.timer_callback)
@@ -65,13 +100,12 @@ class OffboardController(Node):
         self.counter = 0
         self.offboard_enabled = False
         self.armed = False
-        self.landing_requested = False
-        self.exit_requested = False
+        self.waiting_log_printed = False
 
         self.get_logger().info('Offboard controller avviato.')
-        self.get_logger().info("Premi 'l' per LAND, 'q' per uscire.")
+        self.get_logger().info('In attesa del primo target su /whale_nbv/goal_pose ...')
 
-    def target_pose_callback(self, msg: PoseStamped):
+    def goal_pose_callback(self, msg: PoseStamped):
         self.target_x = float(msg.pose.position.x)
         self.target_y = float(msg.pose.position.y)
         self.target_z = float(msg.pose.position.z)
@@ -80,26 +114,75 @@ class OffboardController(Node):
         qy = msg.pose.orientation.y
         qz = msg.pose.orientation.z
         qw = msg.pose.orientation.w
-
         self.target_yaw = self.quaternion_to_yaw(qx, qy, qz, qw)
 
+        first_target = not self.has_received_target
+        self.has_received_target = True
+
+        # reset stato goal per il nuovo target
+        self.goal_reached = False
+        self.goal_reached_reported = False
+        self.publish_goal_reached(False)
+
         self.get_logger().info(
-            f'Nuovo target ricevuto da topic: x={self.target_x:.2f}, '
-            f'y={self.target_y:.2f}, z={self.target_z:.2f}, yaw={self.target_yaw:.2f}'
+            f'Nuovo target: x={self.target_x:.2f}, y={self.target_y:.2f}, '
+            f'z={self.target_z:.2f}, yaw={self.target_yaw:.2f}'
         )
+
+        # solo al primo target resetto la sequenza offboard
+        if first_target:
+            self.counter = 0
+            self.offboard_enabled = False
+            self.armed = False
+            self.get_logger().info('Primo target ricevuto: avvio sequenza OFFBOARD.')
+
+    def vehicle_odometry_callback(self, msg: VehicleOdometry):
+        self.current_x = float(msg.position[0])
+        self.current_y = float(msg.position[1])
+        self.current_z = float(msg.position[2])
+
+        self.current_vx = float(msg.velocity[0])
+        self.current_vy = float(msg.velocity[1])
+        self.current_vz = float(msg.velocity[2])
+
+        self.has_odometry = True
 
     def quaternion_to_yaw(self, qx, qy, qz, qw):
         siny_cosp = 2.0 * (qw * qz + qx * qy)
         cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
         return math.atan2(siny_cosp, cosy_cosp)
 
-    def timer_callback(self):
-        if self.exit_requested:
-            raise SystemExit
+    def compute_distance_to_goal(self):
+        dx = self.target_x - self.current_x
+        dy = self.target_y - self.current_y
+        dz = self.target_z - self.current_z
+        return math.sqrt(dx * dx + dy * dy + dz * dz)
 
-        if self.landing_requested:
+    def compute_speed_norm(self):
+        return math.sqrt(
+            self.current_vx * self.current_vx +
+            self.current_vy * self.current_vy +
+            self.current_vz * self.current_vz
+        )
+
+    def maybe_print_debug(self, distance, speed):
+        now_ns = self.get_clock().now().nanoseconds
+        if now_ns - self.last_debug_time_ns >= self.debug_period_ns:
+            self.get_logger().info(
+                f'Stato goal | distance={distance:.2f} m | speed={speed:.2f} m/s | '
+                f'reached={self.goal_reached}'
+            )
+            self.last_debug_time_ns = now_ns
+
+    def timer_callback(self):
+        # Nessun target ricevuto: non inviare ancora setpoint né comandi OFFBOARD/ARM
+        if not self.has_received_target:
+            if not self.waiting_log_printed:
+                self.get_logger().info('Attendo goal_pose prima di inviare setpoint a PX4.')
+                self.waiting_log_printed = True
             return
 
+        # Mantieni vivo l'offboard e pubblica il setpoint corrente
         self.publish_offboard_control_mode()
         self.publish_trajectory_setpoint()
 
@@ -113,18 +196,33 @@ class OffboardController(Node):
             self.armed = True
             self.get_logger().info('Comando ARM inviato.')
 
+        # Check goal reached solo se arriva odometry
+        if self.has_odometry:
+            distance = self.compute_distance_to_goal()
+            speed = self.compute_speed_norm()
+
+            if distance <= self.goal_tolerance and speed <= self.velocity_tolerance:
+                self.goal_reached = True
+                self.publish_goal_reached(True)
+
+                if not self.goal_reached_reported:
+                    self.get_logger().info(
+                        f'Goal raggiunto e stabilizzato | '
+                        f'distance={distance:.2f} m | speed={speed:.2f} m/s'
+                    )
+                    self.goal_reached_reported = True
+            else:
+                self.goal_reached = False
+                self.publish_goal_reached(False)
+
+            self.maybe_print_debug(distance, speed)
+
         self.counter += 1
 
-    def request_landing(self):
-        if not self.landing_requested:
-            self.landing_requested = True
-            self.get_logger().info('Richiesta landing ricevuta.')
-            self.land()
-
-    def request_exit(self):
-        if not self.exit_requested:
-            self.exit_requested = True
-            self.get_logger().info('Richiesta uscita ricevuta.')
+    def publish_goal_reached(self, value: bool):
+        msg = Bool()
+        msg.data = value
+        self.goal_reached_publisher.publish(msg)
 
     def publish_offboard_control_mode(self):
         msg = OffboardControlMode()
@@ -156,14 +254,6 @@ class OffboardController(Node):
             1.0
         )
 
-    def land(self):
-        self.get_logger().info('Comando LAND inviato.')
-        self.publish_vehicle_command(
-            VehicleCommand.VEHICLE_CMD_NAV_LAND,
-            0.0,
-            0.0
-        )
-
     def publish_vehicle_command(self, command, param1=0.0, param2=0.0):
         msg = VehicleCommand()
         msg.timestamp = self.get_timestamp()
@@ -181,59 +271,12 @@ class OffboardController(Node):
         return int(self.get_clock().now().nanoseconds / 1000)
 
 
-def keyboard_listener(node):
-    fd = sys.stdin.fileno()
-
-    if not sys.stdin.isatty():
-        return
-
-    old_settings = termios.tcgetattr(fd)
-
-    try:
-        tty.setraw(fd)
-        while rclpy.ok():
-            key = sys.stdin.read(1)
-
-            # EOF / terminale chiuso
-            if key == '':
-                node.request_exit()
-                break
-
-            if key.lower() == 'l':
-                node.request_landing()
-
-            elif key.lower() == 'q':
-                node.request_exit()
-                break
-
-    except Exception:
-        node.request_exit()
-
-    finally:
-        try:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        except Exception:
-            pass
-
-
 def main(args=None):
     rclpy.init(args=args)
     node = OffboardController()
 
-    def handle_signal(signum, frame):
-        node.request_exit()
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-    signal.signal(signal.SIGHUP, handle_signal)
-
-    key_thread = threading.Thread(target=keyboard_listener, args=(node,), daemon=True)
-    key_thread.start()
-
     try:
         rclpy.spin(node)
-    except SystemExit:
-        pass
     finally:
         node.destroy_node()
         rclpy.shutdown()

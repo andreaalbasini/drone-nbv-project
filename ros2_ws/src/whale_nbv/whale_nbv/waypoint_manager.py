@@ -4,34 +4,26 @@ import math
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
 from geometry_msgs.msg import PoseStamped
-from px4_msgs.msg import VehicleOdometry
+from std_msgs.msg import Bool
 
 
 class WaypointManager(Node):
     def __init__(self):
         super().__init__('waypoint_manager')
 
-        self.target_pose_publisher = self.create_publisher(
+        self.goal_pose_publisher = self.create_publisher(
             PoseStamped,
-            '/whale_nbv/target_pose',
+            '/whale_nbv/goal_pose',
             10
         )
 
-        qos_profile = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10
-        )
-
-        self.vehicle_odometry_subscriber = self.create_subscription(
-            VehicleOdometry,
-            '/fmu/out/vehicle_odometry',
-            self.vehicle_odometry_callback,
-            qos_profile
+        self.goal_reached_subscriber = self.create_subscription(
+            Bool,
+            '/whale_nbv/goal_reached',
+            self.goal_reached_callback,
+            10
         )
 
         # Lista waypoint: (x, y, z, yaw)
@@ -43,38 +35,20 @@ class WaypointManager(Node):
         ]
 
         self.current_index = 0
-        self.current_position = None
-        self.current_velocity = None
-
-        self.position_tolerance = 0.10   # 10 cm
-        self.velocity_tolerance = 0.10   # 10 cm/s
-
         self.active = True
+
+        self.waiting_for_goal = False
+        self.last_goal_reached = False
 
         self.timer = self.create_timer(0.5, self.timer_callback)
 
         self.get_logger().info('Waypoint manager avviato.')
-        self.get_logger().info(
-            f'Tolleranza posizione: {self.position_tolerance} m'
-        )
-        self.get_logger().info(
-            f'Tolleranza velocita: {self.velocity_tolerance} m/s'
-        )
+        self.get_logger().info(f'Numero waypoint caricati: {len(self.waypoints)}')
 
         self.publish_current_waypoint()
 
-    def vehicle_odometry_callback(self, msg: VehicleOdometry):
-        self.current_position = (
-            float(msg.position[0]),
-            float(msg.position[1]),
-            float(msg.position[2]),
-        )
-
-        self.current_velocity = (
-            float(msg.velocity[0]),
-            float(msg.velocity[1]),
-            float(msg.velocity[2]),
-        )
+    def goal_reached_callback(self, msg: Bool):
+        self.last_goal_reached = bool(msg.data)
 
     def yaw_to_quaternion(self, yaw):
         qx = 0.0
@@ -100,50 +74,26 @@ class WaypointManager(Node):
         msg.pose.orientation.z = qz
         msg.pose.orientation.w = qw
 
-        self.target_pose_publisher.publish(msg)
+        self.goal_pose_publisher.publish(msg)
+
+        self.waiting_for_goal = True
+        self.last_goal_reached = False
 
         self.get_logger().info(
             f'Waypoint pubblicato #{self.current_index}: '
-            f'x={x}, y={y}, z={z}, yaw={yaw:.2f}'
+            f'x={x:.2f}, y={y:.2f}, z={z:.2f}, yaw={yaw:.2f}'
         )
-
-    def distance_to_current_waypoint(self):
-        if self.current_position is None:
-            return None
-
-        x, y, z, _ = self.waypoints[self.current_index]
-        cx, cy, cz = self.current_position
-
-        dx = x - cx
-        dy = y - cy
-        dz = z - cz
-
-        return math.sqrt(dx * dx + dy * dy + dz * dz)
-
-    def speed_norm(self):
-        if self.current_velocity is None:
-            return None
-
-        vx, vy, vz = self.current_velocity
-        return math.sqrt(vx * vx + vy * vy + vz * vz)
 
     def timer_callback(self):
         if not self.active:
             return
 
-        distance = self.distance_to_current_waypoint()
-        speed = self.speed_norm()
-
-        if distance is None or speed is None:
+        if not self.waiting_for_goal:
             return
 
-        self.get_logger().info(
-            f'Waypoint #{self.current_index} | distanza={distance:.2f} m | velocita={speed:.2f} m/s'
-        )
-
-        if distance <= self.position_tolerance and speed <= self.velocity_tolerance:
+        if self.last_goal_reached:
             self.get_logger().info(
-                f'Waypoint #{self.current_index} raggiunto e stabilizzato.'
+                f'Waypoint #{self.current_index} raggiunto.'
             )
 
             if self.current_index < len(self.waypoints) - 1:
@@ -154,6 +104,7 @@ class WaypointManager(Node):
                     'Ultimo waypoint raggiunto. Missione completata.'
                 )
                 self.active = False
+                self.waiting_for_goal = False
 
 
 def main(args=None):
