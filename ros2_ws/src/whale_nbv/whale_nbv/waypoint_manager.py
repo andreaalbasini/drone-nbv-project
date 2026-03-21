@@ -8,6 +8,8 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool
 
+from whale_nbv.utils import yaw_to_quaternion
+
 
 class WaypointManager(Node):
     def __init__(self):
@@ -50,13 +52,6 @@ class WaypointManager(Node):
     def goal_reached_callback(self, msg: Bool):
         self.last_goal_reached = bool(msg.data)
 
-    def yaw_to_quaternion(self, yaw):
-        qx = 0.0
-        qy = 0.0
-        qz = math.sin(yaw / 2.0)
-        qw = math.cos(yaw / 2.0)
-        return qx, qy, qz, qw
-
     def publish_current_waypoint(self):
         x, y, z, yaw = self.waypoints[self.current_index]
 
@@ -68,7 +63,7 @@ class WaypointManager(Node):
         msg.pose.position.y = float(y)
         msg.pose.position.z = float(z)
 
-        qx, qy, qz, qw = self.yaw_to_quaternion(yaw)
+        qx, qy, qz, qw = yaw_to_quaternion(yaw)
         msg.pose.orientation.x = qx
         msg.pose.orientation.y = qy
         msg.pose.orientation.z = qz
@@ -113,8 +108,6 @@ def main(args=None):
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        node.get_logger().info('Ctrl+C ricevuto: chiusura waypoint manager.')
     finally:
         node.destroy_node()
         rclpy.shutdown()

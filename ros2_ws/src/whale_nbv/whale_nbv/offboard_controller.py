@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-import math
-
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
@@ -13,6 +11,8 @@ from px4_msgs.msg import OffboardControlMode
 from px4_msgs.msg import TrajectorySetpoint
 from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import VehicleOdometry
+
+from whale_nbv.utils import quaternion_to_yaw, distance_3d, speed_norm, ros_time_us
 
 
 class OffboardController(Node):
@@ -26,7 +26,7 @@ class OffboardController(Node):
         self.target_yaw = 0.0
         self.has_received_target = False
 
-        # Stato attuale da odometry
+        # Stato attuale
         self.current_x = 0.0
         self.current_y = 0.0
         self.current_z = 0.0
@@ -79,7 +79,7 @@ class OffboardController(Node):
             10
         )
 
-        # QoS corretto per topic PX4 /fmu/out/*
+        # QoS corretto per PX4 /fmu/out/*
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
@@ -114,12 +114,11 @@ class OffboardController(Node):
         qy = msg.pose.orientation.y
         qz = msg.pose.orientation.z
         qw = msg.pose.orientation.w
-        self.target_yaw = self.quaternion_to_yaw(qx, qy, qz, qw)
+        self.target_yaw = quaternion_to_yaw(qx, qy, qz, qw)
 
         first_target = not self.has_received_target
         self.has_received_target = True
 
-        # reset stato goal per il nuovo target
         self.goal_reached = False
         self.goal_reached_reported = False
         self.publish_goal_reached(False)
@@ -129,7 +128,6 @@ class OffboardController(Node):
             f'z={self.target_z:.2f}, yaw={self.target_yaw:.2f}'
         )
 
-        # solo al primo target resetto la sequenza offboard
         if first_target:
             self.counter = 0
             self.offboard_enabled = False
@@ -147,42 +145,31 @@ class OffboardController(Node):
 
         self.has_odometry = True
 
-    def quaternion_to_yaw(self, qx, qy, qz, qw):
-        siny_cosp = 2.0 * (qw * qz + qx * qy)
-        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-        return math.atan2(siny_cosp, cosy_cosp)
-
-    def compute_distance_to_goal(self):
-        dx = self.target_x - self.current_x
-        dy = self.target_y - self.current_y
-        dz = self.target_z - self.current_z
-        return math.sqrt(dx * dx + dy * dy + dz * dz)
-
-    def compute_speed_norm(self):
-        return math.sqrt(
-            self.current_vx * self.current_vx +
-            self.current_vy * self.current_vy +
-            self.current_vz * self.current_vz
+    def compute_distance_to_goal(self) -> float:
+        return distance_3d(
+            self.current_x, self.current_y, self.current_z,
+            self.target_x, self.target_y, self.target_z
         )
 
-    def maybe_print_debug(self, distance, speed):
+    def compute_speed_norm(self) -> float:
+        return speed_norm(self.current_vx, self.current_vy, self.current_vz)
+
+    def maybe_print_debug(self, distance: float, speed: float):
         now_ns = self.get_clock().now().nanoseconds
         if now_ns - self.last_debug_time_ns >= self.debug_period_ns:
             self.get_logger().info(
-                f'Stato goal | distance={distance:.2f} m | speed={speed:.2f} m/s | '
-                f'reached={self.goal_reached}'
+                f'Stato goal | distance={distance:.2f} m | '
+                f'speed={speed:.2f} m/s | reached={self.goal_reached}'
             )
             self.last_debug_time_ns = now_ns
 
     def timer_callback(self):
-        # Nessun target ricevuto: non inviare ancora setpoint né comandi OFFBOARD/ARM
         if not self.has_received_target:
             if not self.waiting_log_printed:
                 self.get_logger().info('Attendo goal_pose prima di inviare setpoint a PX4.')
                 self.waiting_log_printed = True
             return
 
-        # Mantieni vivo l'offboard e pubblica il setpoint corrente
         self.publish_offboard_control_mode()
         self.publish_trajectory_setpoint()
 
@@ -196,7 +183,6 @@ class OffboardController(Node):
             self.armed = True
             self.get_logger().info('Comando ARM inviato.')
 
-        # Check goal reached solo se arriva odometry
         if self.has_odometry:
             distance = self.compute_distance_to_goal()
             speed = self.compute_speed_norm()
@@ -226,7 +212,7 @@ class OffboardController(Node):
 
     def publish_offboard_control_mode(self):
         msg = OffboardControlMode()
-        msg.timestamp = self.get_timestamp()
+        msg.timestamp = ros_time_us(self)
         msg.position = True
         msg.velocity = False
         msg.acceleration = False
@@ -236,7 +222,7 @@ class OffboardController(Node):
 
     def publish_trajectory_setpoint(self):
         msg = TrajectorySetpoint()
-        msg.timestamp = self.get_timestamp()
+        msg.timestamp = ros_time_us(self)
         msg.position = [self.target_x, self.target_y, self.target_z]
         msg.yaw = self.target_yaw
         self.trajectory_setpoint_publisher.publish(msg)
@@ -256,7 +242,7 @@ class OffboardController(Node):
 
     def publish_vehicle_command(self, command, param1=0.0, param2=0.0):
         msg = VehicleCommand()
-        msg.timestamp = self.get_timestamp()
+        msg.timestamp = ros_time_us(self)
         msg.param1 = param1
         msg.param2 = param2
         msg.command = command
@@ -266,9 +252,6 @@ class OffboardController(Node):
         msg.source_component = 1
         msg.from_external = True
         self.vehicle_command_publisher.publish(msg)
-
-    def get_timestamp(self):
-        return int(self.get_clock().now().nanoseconds / 1000)
 
 
 def main(args=None):
