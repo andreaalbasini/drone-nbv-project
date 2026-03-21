@@ -37,3 +37,6 @@ Thumbs.db
 *.tmp
 *.swp
 *.swo
+
+ros2_ws/src/px4_msgs/
+ros2_ws/src/px4_ros_com/
