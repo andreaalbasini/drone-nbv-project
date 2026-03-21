@@ -7,7 +7,14 @@ ros2_ws/build/
 ros2_ws/install/
 ros2_ws/log/
 
-# ===== Log ROS / PX4 / temporanei =====
+# ===== Build nella root progetto =====
+build/
+install/
+log/
+
+# ===== Output runtime / debug =====
+.home/
+aruco_output/
 .ros/
 *.log
 *.ulg
@@ -30,13 +37,3 @@ Thumbs.db
 *.tmp
 *.swp
 *.swo
-
-# ===== Cartelle create per errore =====
---net=host
--v
--w
-ros2_ws/src/px4_msgs/
-ros2_ws/src/px4_ros_com/
-
-PX4-Autopilot/
-Micro-XRCE-DDS-Agent/
