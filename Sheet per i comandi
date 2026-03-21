@@ -26,6 +26,58 @@ Se metti --rm, quando chiudi il terminale il container viene distrutto.
 Senza --rm, rimane attivo.
 
 
-Per aprire un nuovo terminale nel docker :
+Per aprire un NUOVO TERMINALE NEL DOCKER :
 
 docker exec -it ros2_px4 bash
+
+SE DEVI ENTRARE COME ROOT:
+docker exec -u 0 -it ros2_px4 bash
+
+
+SALVARE E COMMITTARE NUOVI CAMBIAMENTI SU GITHUB
+cd ~/Documents/Progetto_Drone
+git status
+git add .
+git commit -m "messaggio"
+git push
+
+
+PER CAMBIAMENTI NEI NODI
+cd /ws_host/ros2_ws
+rm -rf build/whale_nbv install/whale_nbv log
+source /opt/ros/humble/setup.bash
+colcon build --packages-select whale_nbv
+source install/setup.bash
+
+
+Terminale 1 — AVVIO BASE 
+Sull’host:
+sim_drone
+
+Terminale Docker già aperto da sim_drone: ACCENDO IL CERVELLO
+
+mkdir -p ~/.ros/log
+source /opt/ros/humble/setup.bash
+source /ws_host/ros2_ws/install/setup.bash
+ros2 run whale_nbv offboard_controller
+
+
+
+Terminale NUOVO DEL DOCKER : INVIO POSIZIONI SUL TOPIC
+mkdir -p ~/.ros/log
+source /opt/ros/humble/setup.bash
+source /ws_host/ros2_ws/install/setup.bash
+ros2 topic pub /whale_nbv/goal_pose geometry_msgs/msg/PoseStamped "
+header:
+  frame_id: 'map'
+pose:
+  position:
+    x: 0.0
+    y: 0.0
+    z: -5.0
+  orientation:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    w: 1.0
+" --once

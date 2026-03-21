@@ -49,6 +49,7 @@ fi
 
 docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
+
 open_tab "PX4 SITL" "cd '$PX4_DIR'; make px4_sitl gazebo; exec bash"
 sleep 1
 open_tab "XRCE Agent" "cd '$AGENT_DIR'; ./MicroXRCEAgent udp4 -p 8888; exec bash"
