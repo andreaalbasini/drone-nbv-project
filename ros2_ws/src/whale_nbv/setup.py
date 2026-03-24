@@ -27,6 +27,7 @@ setup(
             'offboard_controller = whale_nbv.offboard_controller:main',
             'waypoint_manager = whale_nbv.waypoint_manager:main',
             'aruco_detector = whale_nbv.aruco_detector:main',
+            'aruco_controller = whale_nbv.aruco_controller:main',
         ],
     },
 )
