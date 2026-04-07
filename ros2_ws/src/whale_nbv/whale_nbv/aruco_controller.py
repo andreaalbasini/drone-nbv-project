@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import math
+import numpy as np
 
 import rclpy
 from rclpy.node import Node
@@ -10,7 +11,14 @@ from geometry_msgs.msg import PoseStamped, Point
 from std_msgs.msg import Bool, Float32
 from px4_msgs.msg import VehicleOdometry
 
-from whale_nbv.utils import quaternion_to_yaw
+from whale_nbv.utils import (
+    quaternion_to_yaw,
+    yaw_to_quaternion,
+    quat_wxyz_to_rotmat,
+    make_camera_matrix,
+    pixel_to_camera_ray,
+    intersect_ray_with_plane,
+)
 
 
 class ArucoController(Node):
@@ -35,10 +43,14 @@ class ArucoController(Node):
         # -----------------------------
         # Stato drone da odometria PX4
         # -----------------------------
+        # Stato drone da odometria PX4
         self.current_x = 0.0
         self.current_y = 0.0
         self.current_z = 0.0
         self.current_yaw = 0.0
+
+        self.t_wb = np.zeros(3, dtype=float)   # posizione body nel world PX4
+        self.R_wb = np.eye(3, dtype=float)     # rotazione body -> world
         self.has_odometry = False
 
         # -----------------------------
@@ -53,25 +65,60 @@ class ArucoController(Node):
         self.fx = self.image_width / (2.0 * math.tan(self.hfov / 2.0))
         self.fy = self.fx
 
-        # -----------------------------
-        # Piano noto
-        # In simulazione: ArUco a terra, piano z = 0
-        # -----------------------------
-        self.plane_z = 0.0
+        self.K = make_camera_matrix(self.fx, self.fy, self.cx, self.cy)
+
+        # Camera optical frame C -> body frame B (PX4 FRD)
+        # Assunzione downward camera:
+        # x_C = right image
+        # y_C = down image
+        # z_C = optical axis (downward toward ground)
+        #
+        # In body FRD:
+        # x_B = forward
+        # y_B = right
+        # z_B = down
+        #
+        # Mapping scelto:
+        # z_C -> z_B
+        # x_C -> y_B
+        # y_C -> -x_B
+        self.R_bc = np.array([
+            [0.0, -1.0,  0.0],
+            [1.0,  0.0,  0.0],
+            [0.0,  0.0,  1.0],
+        ], dtype=float)
+
+        # Traslazione camera rispetto al body in frame body FRD
+        # SDF: x=0.12, y=0, z=0.02 nel frame tipo base_link Gazebo (z up).
+        # In FRD approssimiamo: avanti 0.12, destra 0.0, down -0.02
+        self.t_bc = np.array([0.12, 0.0, -0.02], dtype=float)
+
+       
+        # Piano noto in world PX4
+        # Prima approssimazione: piano orizzontale z = 0
+        self.plane_normal_w = np.array([0.0, 0.0, 1.0], dtype=float)
+        self.plane_offset_d = 0.0
+
+
+        self.dry_run = False
 
         # -----------------------------
         # Parametri controllo
         # -----------------------------
-        self.confidence_target = 0.75
+        self.confidence_target = 0.85
         self.min_confidence_to_move = 0.20
 
-        self.pixel_deadband = 15.0
 
         # Guadagno metrico sul piano
-        self.k_xy = 0.35
+        self.k_xy = 0.20
 
         # Saturazione passo
-        self.max_step_xy = 0.15
+        self.max_step_xy_far = 0.10
+        self.max_step_xy_mid = 0.06
+        self.max_step_xy_near = 0.03
+
+        self.step_mid_distance = 1.0
+        self.step_near_distance = 0.30
 
         # Delay tra un comando e il successivo
         self.command_cooldown_ns = int(2.0 * 1e9)
@@ -184,10 +231,18 @@ class ArucoController(Node):
         self.current_y = float(msg.position[1])
         self.current_z = float(msg.position[2])
 
-        qx = float(msg.q[0])
-        qy = float(msg.q[1])
-        qz = float(msg.q[2])
-        qw = float(msg.q[3])
+        self.t_wb = np.array([
+            self.current_x,
+            self.current_y,
+            self.current_z
+        ], dtype=float)
+
+        qw = float(msg.q[0])
+        qx = float(msg.q[1])
+        qy = float(msg.q[2])
+        qz = float(msg.q[3])
+
+        self.R_wb = quat_wxyz_to_rotmat(qw, qx, qy, qz)
         self.current_yaw = quaternion_to_yaw(qx, qy, qz, qw)
 
         self.has_odometry = True
@@ -196,83 +251,70 @@ class ArucoController(Node):
     # GEOMETRIA
     # =========================================================
 
-    def altitude_above_plane(self) -> float:
-        # In PX4/NED tipicamente z negativa sopra il piano z=0
-        return abs(self.current_z - self.plane_z)
 
-    def pixel_to_camera_ground_offset(self, u: float, v: float, height_m: float):
-        """
-        Converte il centro detection (u,v) in offset metrico sul piano,
-        nel frame camera/body locale, assumendo camera verso il basso
-        e piano noto.
-        """
-        du = u - self.cx
-        dv = v - self.cy
+    
+    def compute_camera_pose_in_world(self):
+        R_wc = self.R_wb @ self.R_bc
+        t_wc = self.t_wb + self.R_wb @ self.t_bc
+        return R_wc, t_wc
 
-        if abs(du) < self.pixel_deadband:
-            du = 0.0
-        if abs(dv) < self.pixel_deadband:
-            dv = 0.0
 
-        x_cam = du / self.fx
-        y_cam = dv / self.fy
-
-        offset_u_m = x_cam * height_m
-        offset_v_m = y_cam * height_m
-
-        return offset_u_m, offset_v_m
-
-    def camera_offsets_to_world_offsets(self, offset_u_m: float, offset_v_m: float):
-        """
-        Mapping empirico iniziale:
-        - u (destra immagine) influenza asse laterale
-        - v (basso immagine) influenza asse longitudinale
-
-        Prima costruiamo un offset nel frame orizzontale locale del drone,
-        poi lo ruotiamo nel world con la yaw.
-        """
-
-        # Segni empirici iniziali:
-        # se marker è a destra, il drone deve andare a destra
-        # se marker è in basso, il drone deve andare "indietro/avanti"
-        # Questi segni possono richiedere una singola inversione empirica.
-        dx_body = offset_v_m
-        dy_body = -offset_u_m
-
-        c = math.cos(self.current_yaw)
-        s = math.sin(self.current_yaw)
-
-        dx_world = c * dx_body - s * dy_body
-        dy_world = s * dx_body + c * dy_body
-
-        return dx_world, dy_world
-
-    def compute_world_step(self):
+    def intersect_pixel_with_plane(self, u: float, v: float):
         if not self.has_odometry:
             return None
 
-        h = self.altitude_above_plane()
-        if h < 0.05:
-            self.get_logger().warn('Quota sopra il piano troppo piccola.')
+        ray_c = pixel_to_camera_ray(u, v, self.K)
+
+        R_wc, t_wc = self.compute_camera_pose_in_world()
+        ray_w = R_wc @ ray_c
+
+        point_w = intersect_ray_with_plane(
+            ray_origin_w=t_wc,
+            ray_dir_w=ray_w,
+            plane_normal_w=self.plane_normal_w,
+            plane_offset_d=self.plane_offset_d
+        )
+        return point_w
+
+
+    def compute_world_delta_from_image(self):
+        p_target = self.intersect_pixel_with_plane(self.aruco_center_u, self.aruco_center_v)
+        if p_target is None:
+            self.get_logger().warn('Intersezione target-piano non valida.')
             return None
 
-        offset_u_m, offset_v_m = self.pixel_to_camera_ground_offset(
-            self.aruco_center_u,
-            self.aruco_center_v,
-            h
-        )
+        p_center = self.intersect_pixel_with_plane(self.cx, self.cy)
+        if p_center is None:
+            self.get_logger().warn('Intersezione centro-piano non valida.')
+            return None
 
-        dx_world, dy_world = self.camera_offsets_to_world_offsets(offset_u_m, offset_v_m)
+        delta_w = p_target - p_center
+        return p_target, p_center, delta_w
+        
+    def shape_xy_step(self, delta_x: float, delta_y: float):
+        dist = math.sqrt(delta_x * delta_x + delta_y * delta_y)
 
-        # Guadagno
-        dx_world *= self.k_xy
-        dy_world *= self.k_xy
+        if dist < 1e-9:
+            return 0.0, 0.0, dist, 0.0
 
-        # Saturazione
-        dx_world = max(-self.max_step_xy, min(self.max_step_xy, dx_world))
-        dy_world = max(-self.max_step_xy, min(self.max_step_xy, dy_world))
+        raw_dx = self.k_xy * delta_x
+        raw_dy = self.k_xy * delta_y
+        raw_norm = math.sqrt(raw_dx * raw_dx + raw_dy * raw_dy)
 
-        return dx_world, dy_world, h, offset_u_m, offset_v_m
+        if dist > self.step_mid_distance:
+            max_step = self.max_step_xy_far
+        elif dist > self.step_near_distance:
+            max_step = self.max_step_xy_mid
+        else:
+            max_step = self.max_step_xy_near
+
+        if raw_norm <= max_step:
+            return raw_dx, raw_dy, dist, max_step
+
+        scale = max_step / raw_norm
+        dx = raw_dx * scale
+        dy = raw_dy * scale
+        return dx, dy, dist, max_step    
 
     # =========================================================
     # CONTROL LOOP
@@ -320,22 +362,36 @@ class ArucoController(Node):
             )
             return
 
-        result = self.compute_world_step()
+        result = self.compute_world_delta_from_image()
         if result is None:
             return
 
-        dx_world, dy_world, h, offset_u_m, offset_v_m = result
+        p_target, p_center, delta_w = result
 
-        if abs(dx_world) < 1e-6 and abs(dy_world) < 1e-6:
-            self.get_logger().info('Marker gia` vicino al centro immagine: nessun nuovo movimento.')
+        delta_x = float(delta_w[0])
+        delta_y = float(delta_w[1])
+
+        self.get_logger().info(
+            f'Geometria ray-plane | '
+            f'P_target=({p_target[0]:.3f}, {p_target[1]:.3f}, {p_target[2]:.3f}) | '
+            f'P_center=({p_center[0]:.3f}, {p_center[1]:.3f}, {p_center[2]:.3f}) | '
+            f'delta_w=({delta_x:.3f}, {delta_y:.3f}, {delta_w[2]:.3f})'
+        )
+
+        if self.dry_run:
+            self.get_logger().info('DRY RUN attivo: non pubblico nessun nuovo goal.')
             return
 
-        # IMPORTANTISSIMO:
-        # il nuovo goal parte dalla posa ATTUALE del drone, non dal vecchio goal
+        dx_world, dy_world, dist_xy, max_step_used = self.shape_xy_step(delta_x, delta_y)
+
+        if abs(dx_world) < 1e-6 and abs(dy_world) < 1e-6:
+            self.get_logger().info('Correzione trascurabile: nessun nuovo goal.')
+            return
+
         new_goal_x = self.current_x + dx_world
         new_goal_y = self.current_y + dy_world
         new_goal_z = self.goal_z
-        new_goal_yaw = 0.0
+        new_goal_yaw = self.current_yaw
 
         self.publish_goal(new_goal_x, new_goal_y, new_goal_z, new_goal_yaw)
 
@@ -343,11 +399,10 @@ class ArucoController(Node):
         self.last_command_time_ns = now_ns
 
         self.get_logger().info(
-            f'Nuovo goal metrico pubblicato: '
-            f'x={new_goal_x:.2f}, y={new_goal_y:.2f}, z={new_goal_z:.2f} | '
-            f'dx_world={dx_world:.3f}, dy_world={dy_world:.3f} | '
-            f'offset_u_m={offset_u_m:.3f}, offset_v_m={offset_v_m:.3f} | '
-            f'h={h:.2f}'
+            f'Nuovo goal pubblicato | '
+            f'x={new_goal_x:.2f}, y={new_goal_y:.2f}, z={new_goal_z:.2f}, yaw={new_goal_yaw:.2f} | '
+            f'dx={dx_world:.3f}, dy={dy_world:.3f} | '
+            f'dist_xy={dist_xy:.3f}, max_step={max_step_used:.3f}'
         )
 
     # =========================================================
@@ -363,10 +418,11 @@ class ArucoController(Node):
         msg.pose.position.y = float(y)
         msg.pose.position.z = float(z)
 
-        msg.pose.orientation.x = 0.0
-        msg.pose.orientation.y = 0.0
-        msg.pose.orientation.z = 0.0
-        msg.pose.orientation.w = 1.0
+        qx, qy, qz, qw = yaw_to_quaternion(yaw)
+        msg.pose.orientation.x = float(qx)
+        msg.pose.orientation.y = float(qy)
+        msg.pose.orientation.z = float(qz)
+        msg.pose.orientation.w = float(qw)
 
         self.goal_pub.publish(msg)
 

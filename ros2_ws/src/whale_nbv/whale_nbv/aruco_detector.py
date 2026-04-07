@@ -35,7 +35,7 @@ class ArucoDetectorNode(Node):
 
         self.flag_sub = self.create_subscription(
             Bool,
-            '/position_reached',
+            '/whale_nbv/goal_reached',
             self.flag_callback,
             10
         )

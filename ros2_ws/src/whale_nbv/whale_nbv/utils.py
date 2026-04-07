@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import math
+import numpy as np
 
 
 def quaternion_to_yaw(qx: float, qy: float, qz: float, qw: float) -> float:
@@ -33,3 +34,57 @@ def speed_norm(vx: float, vy: float, vz: float) -> float:
 
 def ros_time_us(node) -> int:
     return int(node.get_clock().now().nanoseconds / 1000)
+
+
+def quat_wxyz_to_rotmat(qw: float, qx: float, qy: float, qz: float) -> np.ndarray:
+    """
+    Rotazione 3x3 da quaternion in ordine PX4 (w, x, y, z).
+    Restituisce la matrice di rotazione body -> world.
+    """
+    return np.array([
+        [1.0 - 2.0 * (qy * qy + qz * qz),     2.0 * (qx * qy - qz * qw),     2.0 * (qx * qz + qy * qw)],
+        [    2.0 * (qx * qy + qz * qw), 1.0 - 2.0 * (qx * qx + qz * qz),     2.0 * (qy * qz - qx * qw)],
+        [    2.0 * (qx * qz - qy * qw),     2.0 * (qy * qz + qx * qw), 1.0 - 2.0 * (qx * qx + qy * qy)],
+    ], dtype=float)
+
+
+def make_camera_matrix(fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
+    return np.array([
+        [fx, 0.0, cx],
+        [0.0, fy, cy],
+        [0.0, 0.0, 1.0],
+    ], dtype=float)
+
+
+def pixel_to_camera_ray(u: float, v: float, K: np.ndarray) -> np.ndarray:
+    """
+    Raggio nel frame ottico camera OpenCV:
+    x destra, y basso, z avanti.
+    """
+    p = np.array([u, v, 1.0], dtype=float)
+    ray = np.linalg.inv(K) @ p
+    norm = np.linalg.norm(ray)
+    if norm < 1e-12:
+        return ray
+    return ray / norm
+
+
+def intersect_ray_with_plane(
+    ray_origin_w: np.ndarray,
+    ray_dir_w: np.ndarray,
+    plane_normal_w: np.ndarray,
+    plane_offset_d: float
+):
+    """
+    Piano: n^T X + d = 0
+    Raggio: X = origin + lambda * dir
+    """
+    denom = float(plane_normal_w @ ray_dir_w)
+    if abs(denom) < 1e-9:
+        return None
+
+    lam = -float(plane_normal_w @ ray_origin_w + plane_offset_d) / denom
+    if lam <= 0.0:
+        return None
+
+    return ray_origin_w + lam * ray_dir_w
