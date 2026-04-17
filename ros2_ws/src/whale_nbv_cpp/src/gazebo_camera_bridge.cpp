@@ -59,7 +59,7 @@ private:
     ros_img.step = img.step();
     ros_img.is_bigendian = false;
 
-    // La camera SDF e` configurata come R8G8B8
+    // The camera SDF is configured as R8G8B8
     ros_img.encoding = "rgb8";
 
     const std::string &data = img.data();

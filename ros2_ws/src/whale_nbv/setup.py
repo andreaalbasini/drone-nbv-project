@@ -28,6 +28,8 @@ setup(
             'waypoint_manager = whale_nbv.waypoint_manager:main',
             'aruco_detector = whale_nbv.aruco_detector:main',
             'aruco_controller = whale_nbv.aruco_controller:main',
+            'nbv_planner = whale_nbv.nbv_planner:main',
+            
         ],
     },
 )

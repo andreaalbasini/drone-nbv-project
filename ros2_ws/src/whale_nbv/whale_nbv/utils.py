@@ -38,8 +38,8 @@ def ros_time_us(node) -> int:
 
 def quat_wxyz_to_rotmat(qw: float, qx: float, qy: float, qz: float) -> np.ndarray:
     """
-    Rotazione 3x3 da quaternion in ordine PX4 (w, x, y, z).
-    Restituisce la matrice di rotazione body -> world.
+    Rotation 3x3 from quaternion PX4 (w, x, y, z).
+    It gives back the rotation matrix body -> world.
     """
     return np.array([
         [1.0 - 2.0 * (qy * qy + qz * qz),     2.0 * (qx * qy - qz * qw),     2.0 * (qx * qz + qy * qw)],
@@ -58,8 +58,8 @@ def make_camera_matrix(fx: float, fy: float, cx: float, cy: float) -> np.ndarray
 
 def pixel_to_camera_ray(u: float, v: float, K: np.ndarray) -> np.ndarray:
     """
-    Raggio nel frame ottico camera OpenCV:
-    x destra, y basso, z avanti.
+    Radius in the optical camera frame OpenCV:
+    x right, y down, z forward.
     """
     p = np.array([u, v, 1.0], dtype=float)
     ray = np.linalg.inv(K) @ p
@@ -76,8 +76,8 @@ def intersect_ray_with_plane(
     plane_offset_d: float
 ):
     """
-    Piano: n^T X + d = 0
-    Raggio: X = origin + lambda * dir
+    Plane: n^T X + d = 0
+    Radius: X = origin + lambda * dir
     """
     denom = float(plane_normal_w @ ray_dir_w)
     if abs(denom) < 1e-9:

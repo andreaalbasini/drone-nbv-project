@@ -26,7 +26,7 @@ class ArucoController(Node):
         super().__init__('aruco_controller')
 
         # -----------------------------
-        # Stato ArUco
+        # State ArUco
         # -----------------------------
         self.aruco_detected = False
         self.aruco_center_u = 0.0
@@ -34,27 +34,27 @@ class ArucoController(Node):
         self.aruco_confidence = 0.0
 
         # -----------------------------
-        # Stato missione / goal
+        # State mission/ goal
         # -----------------------------
         self.goal_reached = False
         self.goal_z = -5.0
         self.has_goal = False
 
         # -----------------------------
-        # Stato drone da odometria PX4
+        # State drone from odometry PX4
         # -----------------------------
-        # Stato drone da odometria PX4
+       
         self.current_x = 0.0
         self.current_y = 0.0
         self.current_z = 0.0
         self.current_yaw = 0.0
 
-        self.t_wb = np.zeros(3, dtype=float)   # posizione body nel world PX4
-        self.R_wb = np.eye(3, dtype=float)     # rotazione body -> world
+        self.t_wb = np.zeros(3, dtype=float)   # position body in world PX4
+        self.R_wb = np.eye(3, dtype=float)     # rotation body -> world
         self.has_odometry = False
 
         # -----------------------------
-        # Parametri camera
+        # Camera Parameters
         # -----------------------------
         self.image_width = 640.0
         self.image_height = 480.0
@@ -68,7 +68,7 @@ class ArucoController(Node):
         self.K = make_camera_matrix(self.fx, self.fy, self.cx, self.cy)
 
         # Camera optical frame C -> body frame B (PX4 FRD)
-        # Assunzione downward camera:
+        # Assumptions downward camera:
         # x_C = right image
         # y_C = down image
         # z_C = optical axis (downward toward ground)
@@ -78,24 +78,27 @@ class ArucoController(Node):
         # y_B = right
         # z_B = down
         #
-        # Mapping scelto:
+        # Mapping:
         # z_C -> z_B
         # x_C -> y_B
         # y_C -> -x_B
+
         self.R_bc = np.array([
             [0.0, -1.0,  0.0],
             [1.0,  0.0,  0.0],
             [0.0,  0.0,  1.0],
         ], dtype=float)
 
-        # Traslazione camera rispetto al body in frame body FRD
-        # SDF: x=0.12, y=0, z=0.02 nel frame tipo base_link Gazebo (z up).
-        # In FRD approssimiamo: avanti 0.12, destra 0.0, down -0.02
+        # Traslation camera respect to body in frame body FRD
+        # SDF: x=0.12, y=0, z=0.02 in frame type base_link Gazebo (z up).
+        # In FRD : forward 0.12, right 0.0, down -0.02
+
         self.t_bc = np.array([0.12, 0.0, -0.02], dtype=float)
 
        
-        # Piano noto in world PX4
-        # Prima approssimazione: piano orizzontale z = 0
+        # Plane known in world PX4
+        # Horizontal plane considered: z = 0
+
         self.plane_normal_w = np.array([0.0, 0.0, 1.0], dtype=float)
         self.plane_offset_d = 0.0
 
@@ -103,16 +106,16 @@ class ArucoController(Node):
         self.dry_run = False
 
         # -----------------------------
-        # Parametri controllo
+        # Parameters control
         # -----------------------------
-        self.confidence_target = 0.85
+        self.confidence_target = 0.65
         self.min_confidence_to_move = 0.20
 
 
-        # Guadagno metrico sul piano
+        # Gain on the plane
         self.k_xy = 0.20
 
-        # Saturazione passo
+        # Step Saturation 
         self.max_step_xy_far = 0.10
         self.max_step_xy_mid = 0.06
         self.max_step_xy_near = 0.03
@@ -120,11 +123,11 @@ class ArucoController(Node):
         self.step_mid_distance = 1.0
         self.step_near_distance = 0.30
 
-        # Delay tra un comando e il successivo
+        # Delay between commands
         self.command_cooldown_ns = int(2.0 * 1e9)
         self.last_command_time_ns = 0
 
-        # Antirimbalzo: dopo un comando, aspetta di nuovo goal_reached=True
+        # After one command, it waits again goal_reached=True
         self.waiting_after_command = False
 
         # -----------------------------
@@ -161,7 +164,7 @@ class ArucoController(Node):
         )
 
         # -----------------------------
-        # Subscriber stato missione
+        # Subscriber state mission
         # -----------------------------
         self.goal_reached_sub = self.create_subscription(
             Bool,
@@ -178,7 +181,7 @@ class ArucoController(Node):
         )
 
         # -----------------------------
-        # Subscriber odometria PX4
+        # Subscriber odometry PX4
         # -----------------------------
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -195,13 +198,13 @@ class ArucoController(Node):
         )
 
         # -----------------------------
-        # Timer controllo
+        # Timer control
         # -----------------------------
         self.timer = self.create_timer(0.5, self.control_loop)
 
-        self.get_logger().info('Aruco controller avviato.')
-        self.get_logger().info('Controllo metrico con camera monoculare + piano noto.')
-        self.get_logger().info('Pubblica target su /whale_nbv/goal_pose')
+        self.get_logger().info('Started Aruco controller.')
+        self.get_logger().info('Control with monocular camera + known plane.')
+        self.get_logger().info('Publishes target on /whale_nbv/goal_pose')
 
     # =========================================================
     # CALLBACK
@@ -248,7 +251,7 @@ class ArucoController(Node):
         self.has_odometry = True
 
     # =========================================================
-    # GEOMETRIA
+    # GEOMETRY
     # =========================================================
 
 
@@ -280,12 +283,12 @@ class ArucoController(Node):
     def compute_world_delta_from_image(self):
         p_target = self.intersect_pixel_with_plane(self.aruco_center_u, self.aruco_center_v)
         if p_target is None:
-            self.get_logger().warn('Intersezione target-piano non valida.')
+            self.get_logger().warn('Intersection target-plane not valid.')
             return None
 
         p_center = self.intersect_pixel_with_plane(self.cx, self.cy)
         if p_center is None:
-            self.get_logger().warn('Intersezione centro-piano non valida.')
+            self.get_logger().warn('Intersection center-plane not valid.')
             return None
 
         delta_w = p_target - p_center
@@ -333,7 +336,7 @@ class ArucoController(Node):
             return
 
         if not self.aruco_detected:
-            self.get_logger().info('Goal raggiunto ma marker non rilevato: aspetto...')
+            self.get_logger().info('Goal reached but marker non relieved: waiting...')
             return
 
         if self.waiting_after_command:
@@ -343,7 +346,7 @@ class ArucoController(Node):
             return
 
         self.get_logger().info(
-            f'Stato ArUco | center=({self.aruco_center_u:.1f}, {self.aruco_center_v:.1f}) '
+            f'State ArUco | center=({self.aruco_center_u:.1f}, {self.aruco_center_v:.1f}) '
             f'confidence={self.aruco_confidence:.3f} '
             f'odom=({self.current_x:.2f}, {self.current_y:.2f}, {self.current_z:.2f}) '
             f'yaw={self.current_yaw:.2f}'
@@ -352,13 +355,13 @@ class ArucoController(Node):
         if self.aruco_confidence >= self.confidence_target:
             self.get_logger().info(
                 f'Confidence {self.aruco_confidence:.3f} >= target {self.confidence_target:.3f}. '
-                f'Nessun nuovo movimento.'
+                f'No new movement.'
             )
             return
 
         if self.aruco_confidence < self.min_confidence_to_move:
             self.get_logger().warn(
-                f'Confidence troppo bassa ({self.aruco_confidence:.3f}) per muovere in modo affidabile.'
+                f'Confidence too low ({self.aruco_confidence:.3f}) to move in reliable way.'
             )
             return
 
@@ -372,20 +375,20 @@ class ArucoController(Node):
         delta_y = float(delta_w[1])
 
         self.get_logger().info(
-            f'Geometria ray-plane | '
+            f'Geometry ray-plane | '
             f'P_target=({p_target[0]:.3f}, {p_target[1]:.3f}, {p_target[2]:.3f}) | '
             f'P_center=({p_center[0]:.3f}, {p_center[1]:.3f}, {p_center[2]:.3f}) | '
             f'delta_w=({delta_x:.3f}, {delta_y:.3f}, {delta_w[2]:.3f})'
         )
 
         if self.dry_run:
-            self.get_logger().info('DRY RUN attivo: non pubblico nessun nuovo goal.')
+            self.get_logger().info('DRY RUN active: do not publish new goal.')
             return
 
         dx_world, dy_world, dist_xy, max_step_used = self.shape_xy_step(delta_x, delta_y)
 
         if abs(dx_world) < 1e-6 and abs(dy_world) < 1e-6:
-            self.get_logger().info('Correzione trascurabile: nessun nuovo goal.')
+            self.get_logger().info('Negligible correction: no new goal.')
             return
 
         new_goal_x = self.current_x + dx_world
@@ -399,7 +402,7 @@ class ArucoController(Node):
         self.last_command_time_ns = now_ns
 
         self.get_logger().info(
-            f'Nuovo goal pubblicato | '
+            f'Published new goal | '
             f'x={new_goal_x:.2f}, y={new_goal_y:.2f}, z={new_goal_z:.2f}, yaw={new_goal_yaw:.2f} | '
             f'dx={dx_world:.3f}, dy={dy_world:.3f} | '
             f'dist_xy={dist_xy:.3f}, max_step={max_step_used:.3f}'

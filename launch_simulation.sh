@@ -56,7 +56,7 @@ open_tab "XRCE Agent" "cd '$AGENT_DIR'; ./MicroXRCEAgent udp4 -p 8888; exec bash
 sleep 1
 open_tab "ROS2 Shell" "docker exec -it '$CONTAINER_NAME' bash -lc 'export HOME=/ws_host/.home; mkdir -p \$HOME/.ros/log; source /opt/ros/humble/setup.bash; [ -f /ws_host/ros2_ws/install/setup.bash ] && source /ws_host/ros2_ws/install/setup.bash; echo \"ROS 2 container pronto.\"; exec bash'"
 
-echo "[OK] Ho richiesto l'apertura di 3 finestre terminale."
-echo "[INFO] Se ne vedi meno di 3, prova a lanciare manualmente:"
+echo "[OK] I request the opening of three terminals."
+echo "[INFO] If you see less then 3, try manually:"
 echo "  docker ps --format '{{.Names}}'"
 echo "  docker exec -it $CONTAINER_NAME bash"

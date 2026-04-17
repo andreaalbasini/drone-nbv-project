@@ -26,7 +26,7 @@ class OffboardController(Node):
         self.target_yaw = 0.0
         self.has_received_target = False
 
-        # Stato attuale
+        # Actual State
         self.current_x = 0.0
         self.current_y = 0.0
         self.current_z = 0.0
@@ -41,7 +41,7 @@ class OffboardController(Node):
         self.goal_reached = False
         self.goal_reached_reported = False
 
-        # Debug log ogni 1 secondo
+        # Debug log every second
         self.last_debug_time_ns = 0
         self.debug_period_ns = int(1.0 * 1e9)
 
@@ -64,7 +64,7 @@ class OffboardController(Node):
             10
         )
 
-        # Publisher stato missione
+        # Publisher mission state
         self.goal_reached_publisher = self.create_publisher(
             Bool,
             '/whale_nbv/goal_reached',
@@ -79,7 +79,7 @@ class OffboardController(Node):
             10
         )
 
-        # QoS corretto per PX4 /fmu/out/*
+        
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
@@ -102,8 +102,8 @@ class OffboardController(Node):
         self.armed = False
         self.waiting_log_printed = False
 
-        self.get_logger().info('Offboard controller avviato.')
-        self.get_logger().info('In attesa del primo target su /whale_nbv/goal_pose ...')
+        self.get_logger().info('Offboard controller started.')
+        self.get_logger().info('Waiting the first goal pose on /whale_nbv/goal_pose ...')
 
     def goal_pose_callback(self, msg: PoseStamped):
         self.target_x = float(msg.pose.position.x)
@@ -124,7 +124,7 @@ class OffboardController(Node):
         self.publish_goal_reached(False)
 
         self.get_logger().info(
-            f'Nuovo target: x={self.target_x:.2f}, y={self.target_y:.2f}, '
+            f'New target: x={self.target_x:.2f}, y={self.target_y:.2f}, '
             f'z={self.target_z:.2f}, yaw={self.target_yaw:.2f}'
         )
 
@@ -132,7 +132,7 @@ class OffboardController(Node):
             self.counter = 0
             self.offboard_enabled = False
             self.armed = False
-            self.get_logger().info('Primo target ricevuto: avvio sequenza OFFBOARD.')
+            self.get_logger().info('Received first target: starting sequence OFFBOARD.')
 
     def vehicle_odometry_callback(self, msg: VehicleOdometry):
         self.current_x = float(msg.position[0])
@@ -158,7 +158,7 @@ class OffboardController(Node):
         now_ns = self.get_clock().now().nanoseconds
         if now_ns - self.last_debug_time_ns >= self.debug_period_ns:
             self.get_logger().info(
-                f'Stato goal | distance={distance:.2f} m | '
+                f'Goal State | distance={distance:.2f} m | '
                 f'speed={speed:.2f} m/s | reached={self.goal_reached}'
             )
             self.last_debug_time_ns = now_ns
@@ -166,7 +166,7 @@ class OffboardController(Node):
     def timer_callback(self):
         if not self.has_received_target:
             if not self.waiting_log_printed:
-                self.get_logger().info('Attendo goal_pose prima di inviare setpoint a PX4.')
+                self.get_logger().info('Waiting goal_pose before sending setpoint to PX4.')
                 self.waiting_log_printed = True
             return
 
@@ -176,12 +176,12 @@ class OffboardController(Node):
         if self.counter == 10 and not self.offboard_enabled:
             self.engage_offboard_mode()
             self.offboard_enabled = True
-            self.get_logger().info('Comando OFFBOARD inviato.')
+            self.get_logger().info('Sent OFFBOARD command.')
 
         if self.counter == 12 and not self.armed:
             self.arm()
             self.armed = True
-            self.get_logger().info('Comando ARM inviato.')
+            self.get_logger().info('Sent ARM command.')
 
         if self.has_odometry:
             distance = self.compute_distance_to_goal()
@@ -193,7 +193,7 @@ class OffboardController(Node):
 
                 if not self.goal_reached_reported:
                     self.get_logger().info(
-                        f'Goal raggiunto e stabilizzato | '
+                        f'Goal reached | '
                         f'distance={distance:.2f} m | speed={speed:.2f} m/s'
                     )
                     self.goal_reached_reported = True

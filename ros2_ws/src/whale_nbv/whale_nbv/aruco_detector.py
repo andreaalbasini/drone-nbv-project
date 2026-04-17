@@ -1,6 +1,8 @@
+#!/usr/bin/env python3
+
 import os
-from datetime import datetime
 import math
+import json
 
 import cv2
 from cv_bridge import CvBridge
@@ -8,8 +10,7 @@ import rclpy
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Int32, Float32
-from geometry_msgs.msg import Point
+from std_msgs.msg import Bool, String
 
 
 class ArucoDetectorNode(Node):
@@ -18,7 +19,11 @@ class ArucoDetectorNode(Node):
 
         self.bridge = CvBridge()
         self.latest_frame = None
-        self.capture_done_for_current_true = False
+
+        # Stato detection più recente
+        self.latest_detections = []
+        self.latest_detected = False
+        self.last_ids_for_log = None
 
         image_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -33,32 +38,18 @@ class ArucoDetectorNode(Node):
             image_qos
         )
 
-        self.flag_sub = self.create_subscription(
-            Bool,
-            '/whale_nbv/goal_reached',
-            self.flag_callback,
-            10
-        )
-
-        # Publisher dati ArUco
+        # Output multi-marker
         self.detected_pub = self.create_publisher(Bool, '/aruco/detected', 10)
-        self.marker_id_pub = self.create_publisher(Int32, '/aruco/marker_id', 10)
-        self.center_pub = self.create_publisher(Point, '/aruco/center', 10)
-        self.error_pub = self.create_publisher(Point, '/aruco/error', 10)
-        self.confidence_pub = self.create_publisher(Float32, '/aruco/confidence', 10)
-        self.bbox_area_pub = self.create_publisher(Float32, '/aruco/bbox_area', 10)
+        self.detections_json_pub = self.create_publisher(String, '/aruco/detections_json', 10)
 
-        # Publisher di debug per i singoli score
-        self.size_score_pub = self.create_publisher(Float32, '/aruco/size_score', 10)
-        self.center_score_pub = self.create_publisher(Float32, '/aruco/center_score', 10)
-        self.shape_score_pub = self.create_publisher(Float32, '/aruco/shape_score', 10)
-        self.border_score_pub = self.create_publisher(Float32, '/aruco/border_score', 10)
-
+        # Cartella debug futura, ma qui non salviamo immagini
         self.output_dir = '/ws_host/aruco_output'
         os.makedirs(self.output_dir, exist_ok=True)
 
-        self.get_logger().info('Aruco detector pronto')
-        self.get_logger().info(f'Salvataggio in: {self.output_dir}')
+        self.get_logger().info('Aruco detector ready')
+        self.get_logger().info('Multi-marker mode enabled')
+        self.get_logger().info('Publishing detections at 2 Hz')
+        self.get_logger().info('Detailed confidence debug enabled')
 
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 
@@ -67,40 +58,52 @@ class ArucoDetectorNode(Node):
         else:
             self.aruco_params = cv2.aruco.DetectorParameters_create()
 
+        # Parametri utili per detection più stabile
+        if hasattr(self.aruco_params, 'cornerRefinementMethod'):
+            self.aruco_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+
+        if hasattr(self.aruco_params, 'adaptiveThreshWinSizeMin'):
+            self.aruco_params.adaptiveThreshWinSizeMin = 3
+        if hasattr(self.aruco_params, 'adaptiveThreshWinSizeMax'):
+            self.aruco_params.adaptiveThreshWinSizeMax = 23
+        if hasattr(self.aruco_params, 'adaptiveThreshWinSizeStep'):
+            self.aruco_params.adaptiveThreshWinSizeStep = 10
+        if hasattr(self.aruco_params, 'minMarkerPerimeterRate'):
+            self.aruco_params.minMarkerPerimeterRate = 0.02
+        if hasattr(self.aruco_params, 'maxMarkerPerimeterRate'):
+            self.aruco_params.maxMarkerPerimeterRate = 4.0
+
         self.use_aruco_detector = hasattr(cv2.aruco, 'ArucoDetector')
         if self.use_aruco_detector:
             self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
         else:
             self.detector = None
 
+        # Pubblicazione lenta
+        self.publish_period_s = 0.5  # 2 Hz
+        self.publish_timer = self.create_timer(self.publish_period_s, self.publish_timer_callback)
+
+    # =========================================================
+    # CALLBACKS
+    # =========================================================
+
     def image_callback(self, msg: Image):
         try:
             self.latest_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            self.detect_and_publish()
+            self.update_detections()
         except Exception as e:
-            self.get_logger().error(f'Errore conversione immagine: {e}')
+            self.get_logger().error(f'Error image conversion: {e}')
 
-    def flag_callback(self, msg: Bool):
-        if not msg.data:
-            self.capture_done_for_current_true = False
-            return
+    # =========================================================
+    # DETECTION
+    # =========================================================
 
-        if self.capture_done_for_current_true:
-            return
-
-        if self.latest_frame is None:
-            self.get_logger().warn('Flag true ricevuto ma nessun frame disponibile')
-            return
-
-        self.capture_done_for_current_true = True
-        self.process_and_save_frame()
-
-    def detect_markers(self, frame):
+    def detect_markers(self, frame_gray):
         if self.use_aruco_detector:
-            corners, ids, _ = self.detector.detectMarkers(frame)
+            corners, ids, _ = self.detector.detectMarkers(frame_gray)
         else:
             corners, ids, _ = cv2.aruco.detectMarkers(
-                frame,
+                frame_gray,
                 self.aruco_dict,
                 parameters=self.aruco_params
             )
@@ -110,15 +113,13 @@ class ArucoDetectorNode(Node):
         h, w = frame.shape[:2]
         img_area = float(w * h)
 
-        # centro marker
         cx = float(pts[:, 0].mean())
         cy = float(pts[:, 1].mean())
 
-        # area quadrilatero
         quad_area = abs(cv2.contourArea(pts.astype('float32')))
-        size_score = min(1.0, quad_area / img_area * 25.0)
+        image_area_ratio = quad_area / img_area if img_area > 0 else 0.0
+        size_score = min(1.0, image_area_ratio * 60.0)
 
-        # distanza dal centro immagine
         cx_img = w / 2.0
         cy_img = h / 2.0
         dist = math.sqrt((cx - cx_img) ** 2 + (cy - cy_img) ** 2)
@@ -126,7 +127,6 @@ class ArucoDetectorNode(Node):
         dist_norm = dist / dist_max if dist_max > 0 else 1.0
         center_score = max(0.0, 1.0 - dist_norm)
 
-        # qualità forma: rapporto lato corto / lato lungo
         side_lengths = []
         for i in range(4):
             p1 = pts[i]
@@ -138,7 +138,6 @@ class ArucoDetectorNode(Node):
         shape_score = (min_side / max_side) if max_side > 0 else 0.0
         shape_score = max(0.0, min(1.0, shape_score))
 
-        # distanza dai bordi
         min_x = float(pts[:, 0].min())
         max_x = float(pts[:, 0].max())
         min_y = float(pts[:, 1].min())
@@ -148,23 +147,27 @@ class ArucoDetectorNode(Node):
         border_score = max(0.0, margin / min(w, h))
         border_score = min(1.0, border_score * 4.0)
 
-        # confidence totale
         confidence = (
-            0.35 * size_score +
-            0.20 * center_score +
-            0.25 * shape_score +
-            0.20 * border_score
+            0.55 * size_score +
+            0.15 * center_score +
+            0.20 * shape_score +
+            0.10 * border_score
         )
         confidence = max(0.0, min(1.0, confidence))
 
-        # bbox area per debug
         bbox_area = max(0.0, (max_x - min_x) * (max_y - min_y))
 
         return {
             'cx': cx,
             'cy': cy,
+            'min_x': min_x,
+            'max_x': max_x,
+            'min_y': min_y,
+            'max_y': max_y,
             'bbox_area': bbox_area,
             'quad_area': quad_area,
+            'image_area_ratio': image_area_ratio,
+            'margin_px': margin,
             'size_score': size_score,
             'center_score': center_score,
             'shape_score': shape_score,
@@ -172,115 +175,101 @@ class ArucoDetectorNode(Node):
             'confidence': confidence
         }
 
-    def detect_and_publish(self):
+    def update_detections(self):
         if self.latest_frame is None:
+            self.latest_detections = []
+            self.latest_detected = False
             return
 
         frame = self.latest_frame
-        h, w = frame.shape[:2]
-        cx_img = w / 2.0
-        cy_img = h / 2.0
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        corners, ids = self.detect_markers(frame)
+        corners, ids = self.detect_markers(frame_gray)
 
-        detected_msg = Bool()
-        center_msg = Point()
-        error_msg = Point()
-        marker_id_msg = Int32()
-        confidence_msg = Float32()
-        bbox_area_msg = Float32()
+        if ids is None or len(ids) == 0:
+            self.latest_detections = []
+            self.latest_detected = False
 
-        if ids is not None and len(ids) > 0:
-            detected_msg.data = True
+            if self.last_ids_for_log != []:
+                self.get_logger().info('Raw detected ids: []')
+                self.last_ids_for_log = []
+            return
 
-            pts = corners[0][0]
+        raw_ids = [int(x[0]) for x in ids]
+        if raw_ids != self.last_ids_for_log:
+            self.get_logger().info(f'Raw detected ids: {raw_ids}')
+            self.last_ids_for_log = raw_ids
+
+        detections = []
+
+        for i in range(len(ids)):
+            marker_id = int(ids[i][0])
+            pts = corners[i][0]
             metrics = self.compute_confidence(frame, pts)
 
-            err_x = metrics['cx'] - cx_img
-            err_y = metrics['cy'] - cy_img
+            detection = {
+                "id": marker_id,
+                "center": [
+                    float(metrics["cx"]),
+                    float(metrics["cy"])
+                ],
+                "bbox": [
+                    float(metrics["min_x"]),
+                    float(metrics["min_y"]),
+                    float(metrics["max_x"]),
+                    float(metrics["max_y"])
+                ],
+                "confidence": float(metrics["confidence"]),
+                "bbox_area": float(metrics["bbox_area"]),
+                "quad_area": float(metrics["quad_area"]),
+                "image_area_ratio": float(metrics["image_area_ratio"]),
+                "margin_px": float(metrics["margin_px"]),
+                "size_score": float(metrics["size_score"]),
+                "center_score": float(metrics["center_score"]),
+                "shape_score": float(metrics["shape_score"]),
+                "border_score": float(metrics["border_score"])
+            }
 
-            center_msg.x = metrics['cx']
-            center_msg.y = metrics['cy']
-            center_msg.z = 0.0
+            detections.append(detection)
 
-            error_msg.x = err_x
-            error_msg.y = err_y
-            error_msg.z = 0.0
+        detections.sort(key=lambda d: d["id"])
 
-            marker_id_msg.data = int(ids[0][0])
-            confidence_msg.data = float(metrics['confidence'])
-            bbox_area_msg.data = float(metrics['bbox_area'])
+        self.latest_detections = detections
+        self.latest_detected = True
 
-            self.detected_pub.publish(detected_msg)
-            self.marker_id_pub.publish(marker_id_msg)
-            self.center_pub.publish(center_msg)
-            self.error_pub.publish(error_msg)
-            self.confidence_pub.publish(confidence_msg)
-            self.bbox_area_pub.publish(bbox_area_msg)
+    # =========================================================
+    # PUBLISH + DEBUG LOG
+    # =========================================================
 
-            self.size_score_pub.publish(Float32(data=float(metrics['size_score'])))
-            self.center_score_pub.publish(Float32(data=float(metrics['center_score'])))
-            self.shape_score_pub.publish(Float32(data=float(metrics['shape_score'])))
-            self.border_score_pub.publish(Float32(data=float(metrics['border_score'])))
-        else:
-            detected_msg.data = False
-            self.detected_pub.publish(detected_msg)
+    def publish_timer_callback(self):
+        self.detected_pub.publish(Bool(data=self.latest_detected))
 
-    def process_and_save_frame(self):
-        frame = self.latest_frame.copy()
-        annotated = frame.copy()
+        json_msg = String()
+        json_msg.data = json.dumps(self.latest_detections)
+        self.detections_json_pub.publish(json_msg)
 
-        h, w = frame.shape[:2]
-        cx_img = w / 2.0
-        cy_img = h / 2.0
+        detected_ids = [d["id"] for d in self.latest_detections]
+        self.get_logger().info(
+            f'Published {len(self.latest_detections)} marker(s): ids={detected_ids}'
+        )
 
-        corners, ids = self.detect_markers(frame)
+        if len(self.latest_detections) == 0:
+            return
 
-        detected = 0
-
-        if ids is not None and len(ids) > 0:
-            cv2.aruco.drawDetectedMarkers(annotated, corners, ids)
-            detected = len(ids)
-
-            pts = corners[0][0]
-            metrics = self.compute_confidence(frame, pts)
-
-            err_x = metrics['cx'] - cx_img
-            err_y = metrics['cy'] - cy_img
-
+        for det in self.latest_detections:
             self.get_logger().info(
-                f'Aruco id={int(ids[0][0])} '
-                f'center=({metrics["cx"]:.1f}, {metrics["cy"]:.1f}) '
-                f'error=({err_x:.1f}, {err_y:.1f}) '
-                f'bbox_area={metrics["bbox_area"]:.1f} '
-                f'conf={metrics["confidence"]:.3f} '
-                f'[size={metrics["size_score"]:.3f}, '
-                f'center={metrics["center_score"]:.3f}, '
-                f'shape={metrics["shape_score"]:.3f}, '
-                f'border={metrics["border_score"]:.3f}]'
+                f"[MARKER {det['id']}] "
+                f"center=({det['center'][0]:.1f}, {det['center'][1]:.1f}) | "
+                f"conf={det['confidence']:.3f} | "
+                f"bbox_area={det['bbox_area']:.1f} | "
+                f"quad_area={det['quad_area']:.1f} | "
+                f"img_ratio={det['image_area_ratio']:.5f} | "
+                f"margin_px={det['margin_px']:.1f} | "
+                f"size={det['size_score']:.3f} | "
+                f"center_score={det['center_score']:.3f} | "
+                f"shape={det['shape_score']:.3f} | "
+                f"border={det['border_score']:.3f}"
             )
-
-            cv2.circle(annotated, (int(cx_img), int(cy_img)), 5, (255, 0, 0), -1)
-            cv2.circle(annotated, (int(metrics["cx"]), int(metrics["cy"])), 5, (0, 0, 255), -1)
-            cv2.line(
-                annotated,
-                (int(cx_img), int(cy_img)),
-                (int(metrics["cx"]), int(metrics["cy"])),
-                (0, 255, 0),
-                2
-            )
-
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-        raw_path = os.path.join(self.output_dir, f'raw_{timestamp}.png')
-        annotated_path = os.path.join(self.output_dir, f'annotated_{timestamp}.png')
-
-        ok_raw = cv2.imwrite(raw_path, frame)
-        ok_ann = cv2.imwrite(annotated_path, annotated)
-
-        self.get_logger().info(f'Marker rilevati: {detected}')
-        self.get_logger().info(f'Salvataggio raw riuscito: {ok_raw} -> {raw_path}')
-        self.get_logger().info(f'Salvataggio annotated riuscito: {ok_ann} -> {annotated_path}')
 
 
 def main(args=None):
@@ -289,3 +278,7 @@ def main(args=None):
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
