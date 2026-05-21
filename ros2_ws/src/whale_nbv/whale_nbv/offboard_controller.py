@@ -105,6 +105,27 @@ class OffboardController(Node):
         self.get_logger().info('Offboard controller started.')
         self.get_logger().info('Waiting the first goal pose on /whale_nbv/goal_pose ...')
 
+        self.mission_complete_sub = self.create_subscription(
+            Bool, '/whale_nbv/mission_complete',
+            self.mission_complete_callback, 10)
+
+        self.rtl_active = False
+        self.home_z = -4.0  # quota di rientro sicura
+        self.rtl_phase = 0       # 1 = sposta XY, 2 = invia LAND
+        self.landing_sent = False
+
+    def mission_complete_callback(self, msg: Bool):
+        if msg.data and not self.rtl_active:
+            self.rtl_active = True
+            self.rtl_phase = 1
+            self.get_logger().info('RTL fase 1: torno su XY mantenendo quota attuale')
+            self.target_x = 0.0
+            self.target_y = 0.0
+            self.target_z = self.current_z
+            self.target_yaw = 0.0
+            self.goal_reached = False
+            self.goal_reached_reported = False
+
     def goal_pose_callback(self, msg: PoseStamped):
         self.target_x = float(msg.pose.position.x)
         self.target_y = float(msg.pose.position.y)
@@ -202,6 +223,19 @@ class OffboardController(Node):
                 self.publish_goal_reached(False)
 
             self.maybe_print_debug(distance, speed)
+
+        if self.rtl_active and self.goal_reached:
+            if self.rtl_phase == 1:
+                self.rtl_phase = 2
+                self.get_logger().info('RTL fase 2: invio LAND')
+                self.target_z = self.home_z  # scendi alla quota hover prima del land
+                self.goal_reached = False
+                self.goal_reached_reported = False
+
+            elif self.rtl_phase == 2 and not self.landing_sent:
+                self.landing_sent = True
+                self.get_logger().info('Quota raggiunta: invio LAND')
+                self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
 
         self.counter += 1
 

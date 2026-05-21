@@ -38,6 +38,15 @@ class ArucoDetectorNode(Node):
             image_qos
         )
 
+        self.goal_reached_sub = self.create_subscription(
+            Bool,
+            '/whale_nbv/goal_reached',
+            self.goal_reached_callback,
+            10
+        )
+        self.last_goal_reached_state = False
+        self.photo_counter = 0
+
         # Output multi-marker
         self.detected_pub = self.create_publisher(Bool, '/aruco/detected', 10)
         self.detections_json_pub = self.create_publisher(String, '/aruco/detections_json', 10)
@@ -83,6 +92,8 @@ class ArucoDetectorNode(Node):
         self.publish_period_s = 0.5  # 2 Hz
         self.publish_timer = self.create_timer(self.publish_period_s, self.publish_timer_callback)
 
+
+
     # =========================================================
     # CALLBACKS
     # =========================================================
@@ -93,6 +104,39 @@ class ArucoDetectorNode(Node):
             self.update_detections()
         except Exception as e:
             self.get_logger().error(f'Error image conversion: {e}')
+
+
+    def goal_reached_callback(self, msg: Bool):
+    # Scatta solo sul fronte di salita (False -> True), non ad ogni tick
+        if msg.data and not self.last_goal_reached_state:
+            self.save_waypoint_photo()
+        self.last_goal_reached_state = msg.data
+
+    def save_waypoint_photo(self):
+        if self.latest_frame is None:
+            self.get_logger().warn('Photo trigger: no frame available')
+            return
+
+        frame = self.latest_frame.copy()
+        
+        # Annota il frame con i dati di detection correnti
+        annotated = frame.copy()
+        for det in self.latest_detections:
+            bbox = det['bbox']  # [min_x, min_y, max_x, max_y]
+            cv2.rectangle(annotated,
+                (int(bbox[0]), int(bbox[1])),
+                (int(bbox[2]), int(bbox[3])),
+                (0, 255, 0), 2)
+            label = f"ID {det['id']} | conf={det['confidence']:.2f}"
+            cv2.putText(annotated, label,
+                (int(bbox[0]), int(bbox[1]) - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        filename = f'waypoint_{self.photo_counter:04d}.jpg'
+        path = os.path.join(self.output_dir, filename)
+        cv2.imwrite(path, annotated)
+        self.photo_counter += 1
+        self.get_logger().info(f'Photo saved: {path} | markers={[d["id"] for d in self.latest_detections]}')
 
     # =========================================================
     # DETECTION
@@ -148,8 +192,8 @@ class ArucoDetectorNode(Node):
         border_score = min(1.0, border_score * 4.0)
 
         confidence = (
-            0.55 * size_score +
-            0.15 * center_score +
+            0.50 * size_score +  
+            0.20 * center_score +
             0.20 * shape_score +
             0.10 * border_score
         )
