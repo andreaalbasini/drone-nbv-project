@@ -1,43 +1,7 @@
-# ===== Grandi dipendenze esterne =====
-PX4-Autopilot/
-Micro-XRCE-DDS-Agent/
-
-# ===== Build ROS 2 =====
-ros2_ws/build/
-ros2_ws/install/
-ros2_ws/log/
-
-# ===== Build nella root progetto =====
-build/
-install/
-log/
-
-# ===== Output runtime / debug =====
-.home/
-aruco_output/
-.ros/
-*.log
-*.ulg
-
-# ===== Python =====
+ros2_ws_AA/build/
+ros2_ws_AA/install/
+ros2_ws_AA/log/
 __pycache__/
 *.pyc
-*.pyo
-
-# ===== Editor / IDE =====
-.vscode/
-.idea/
-
-# ===== Sistema =====
-.DS_Store
-Thumbs.db
-
-# ===== File temporanei =====
-*~
-*.tmp
-*.swp
-*.swo
-
-ros2_ws/src/px4_msgs/
-ros2_ws/src/px4_ros_com/
-/Sheet per i comandi
+calibration_data/*.jpg
+report_images/

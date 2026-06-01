@@ -1,0 +1,12 @@
+We were using DataStream SDK v1.5.0, but upgraded to v1.11.0 to use the GetCentroidCount and GetCentroidPosition functions. These functions exist in 1.5.0, but the binary shared library which was released with the SDK was compiled with the old CXX ABI, which meant that there were issues with passing std::string arguments. Starting in SDK v1.8.0, the sources were released, allowing us to compile the SDK and avoiding linking errors due to mismatched ABI.
+
+However, these SDKs only officially support Tracker 3.x, but we use Tracker 2.2. As a result, there will likely be many SDK v1.11.0 functions that do not work. Here is a list of functions that are known not to work:
+
+- GetObjectQuality
+- GetMarkerRayContributionCount
+- GetMarkerRayContribution
+
+New functions known to work:
+
+- GetLabeledMarkerCount
+- GetLabeledMarkerGlobalTranslation

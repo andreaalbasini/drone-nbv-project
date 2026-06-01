@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <!-- Launch the mocap node -->
+  <node
+    pkg="mocap"
+    exec="mocap_node"
+    name="vicon"
+    output="screen"
+  >
+    <!-- Load room_bounds params from YAML -->
+    <param from="$(find-pkg-share mocap)/param/vicon.yaml"/>
+
+    <!-- General Parameters -->
+    <param name="tf_parent_frame"             value="world"/>
+    <param name="mocap_wrt_parent_frame"      value="0 0 0 -1.5708 0 0"/>
+    <param name="body_wrt_mocap_body"         value="0 0 0 1.5708 0 0"/>
+    <param name="num_markers_missing_tol"     value="4"/>
+    <param name="q_diff_threshold"            value="0.1"/>
+    <param name="skipped_meas_pos_tol"        value="3"/>
+    <param name="skipped_meas_att_tol"        value="20"/>
+    <param name="pub_status"                  value="true"/>
+    <param name="pub_twist"                   value="true"/>
+    <param name="pub_accel"                   value="true"/>
+    <param name="tf_broadcast"                value="true"/>
+
+    <!-- VICON-specific parameters -->
+    <param name="client"                      value="vicon"/>
+    <param name="host"                        value="192.168.0.9:801"/>
+
+    <!-- RPC parameters -->
+    <param name="enable_rpc"                  value="false"/>
+    <param name="rpc_server_uri"              value="http://192.168.0.9:1250"/>
+
+    <!-- Extras -->
+    <param name="should_pub_cameras"          value="false"/>
+    <param name="should_pub_unlabeledmarkers" value="false"/>
+  </node>
+</launch>

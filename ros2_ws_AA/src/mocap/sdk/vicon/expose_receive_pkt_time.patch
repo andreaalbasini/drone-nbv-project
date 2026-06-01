@@ -1,0 +1,101 @@
+diff --git a/Vicon/CrossMarket/DataStream/ViconCGStream/Timecode.h b/Vicon/CrossMarket/DataStream/ViconCGStream/Timecode.h
+index 298146e..b80db29 100644
+--- a/Vicon/CrossMarket/DataStream/ViconCGStream/Timecode.h
++++ b/Vicon/CrossMarket/DataStream/ViconCGStream/Timecode.h
+@@ -61,6 +61,9 @@ public:
+   ViconCGStreamType::UInt8  m_FieldFlag;
+   ViconCGStreamType::UInt32 m_Standard;
+ 
++  /// Receive time of packet / frame
++  ViconCGStreamType::Double m_PacketReceiptTime;
++
+   VTimecode()
+   : m_Hours( 0 )
+   , m_Minutes( 0 )
+@@ -71,6 +74,7 @@ public:
+   , m_UserBits( 0 )
+   , m_FieldFlag( 0 )
+   , m_Standard( ETimecodeNone )
++  , m_PacketReceiptTime( 0 )
+   {
+   }
+ 
+diff --git a/Vicon/CrossMarket/DataStream/ViconCGStreamClient/ViconCGStreamClient.cpp b/Vicon/CrossMarket/DataStream/ViconCGStreamClient/ViconCGStreamClient.cpp
+index 7988ab2..9ab1c60 100644
+--- a/Vicon/CrossMarket/DataStream/ViconCGStreamClient/ViconCGStreamClient.cpp
++++ b/Vicon/CrossMarket/DataStream/ViconCGStreamClient/ViconCGStreamClient.cpp
+@@ -1243,6 +1243,9 @@ bool VViconCGStreamClient::ReadObjects( VCGStreamReaderWriter& i_rReaderWriter )
+         return false;
+       }
+ 
++      // capture the time this packet (ideally, the entire frame?) was captured
++      pDynamicObjects->m_Timecode.m_PacketReceiptTime = PacketReceiptTime;
++
+       break;
+     case ViconCGStreamEnum::LatencyInfo:
+     {
+diff --git a/Vicon/CrossMarket/DataStream/ViconDataStreamSDKCore/CoreClient.cpp b/Vicon/CrossMarket/DataStream/ViconDataStreamSDKCore/CoreClient.cpp
+index 13e895f..4ce993c 100644
+--- a/Vicon/CrossMarket/DataStream/ViconDataStreamSDKCore/CoreClient.cpp
++++ b/Vicon/CrossMarket/DataStream/ViconDataStreamSDKCore/CoreClient.cpp
+@@ -605,7 +605,8 @@ Result::Enum VClient::GetTimecode( unsigned int           & o_rHours,
+                                    bool                   & o_rbFieldFlag,
+                                    TimecodeStandard::Enum & o_rTimecodeStandard,
+                                    unsigned int           & o_rSubFramesPerFrame,
+-                                   unsigned int           & o_rUserBits ) const
++                                   unsigned int           & o_rUserBits,
++                                   double                 & o_rPacketReceiptTime ) const
+ {
+   boost::recursive_mutex::scoped_lock Lock( m_FrameMutex );
+   
+@@ -634,6 +635,10 @@ Result::Enum VClient::GetTimecode( unsigned int           & o_rHours,
+   o_rSubFramesPerFrame = m_LatestFrame.m_Timecode.m_SubframesPerFrame;
+   o_rUserBits          = m_LatestFrame.m_Timecode.m_UserBits;
+ 
++  if (o_rPacketReceiptTime) {
++    o_rPacketReceiptTime = m_LatestFrame.m_Timecode.m_PacketReceiptTime;
++  }
++
+   switch( m_LatestFrame.m_Timecode.m_Standard )
+   {
+   case ViconCGStream::VTimecode::ETimecodePAL      : o_rTimecodeStandard = TimecodeStandard::PAL;      break;
+diff --git a/Vicon/CrossMarket/DataStream/ViconDataStreamSDKCore/CoreClient.h b/Vicon/CrossMarket/DataStream/ViconDataStreamSDKCore/CoreClient.h
+index 62baf5a..5233177 100644
+--- a/Vicon/CrossMarket/DataStream/ViconDataStreamSDKCore/CoreClient.h
++++ b/Vicon/CrossMarket/DataStream/ViconDataStreamSDKCore/CoreClient.h
+@@ -98,7 +98,8 @@ public:
+                             bool                   & o_rbFieldFlag,
+                             TimecodeStandard::Enum & o_rTimecodeStandard,
+                             unsigned int           & o_rSubFramesPerFrame,
+-                            unsigned int           & o_rUserBits ) const;
++                            unsigned int           & o_rUserBits,
++                            double                 & o_rPacketReceiptTime ) const;
+ 
+ 
+   // Latency reporting
+diff --git a/Vicon/CrossMarket/DataStream/ViconDataStreamSDK_CPP/DataStreamClient.cpp b/Vicon/CrossMarket/DataStream/ViconDataStreamSDK_CPP/DataStreamClient.cpp
+index c1937b2..f2c9137 100644
+--- a/Vicon/CrossMarket/DataStream/ViconDataStreamSDK_CPP/DataStreamClient.cpp
++++ b/Vicon/CrossMarket/DataStream/ViconDataStreamSDK_CPP/DataStreamClient.cpp
+@@ -549,7 +549,8 @@ namespace CPP
+                                                                       Output.FieldFlag,
+                                                                       _TimecodeStandard,
+                                                                       Output.SubFramesPerFrame,
+-                                                                      Output.UserBits ) );
++                                                                      Output.UserBits,
++                                                                      Output.PacketReceiptTime ) );
+ 
+     Output.Standard = Adapt( _TimecodeStandard );
+     
+diff --git a/Vicon/CrossMarket/DataStream/ViconDataStreamSDK_CPP/IDataStreamClientBase.h b/Vicon/CrossMarket/DataStream/ViconDataStreamSDK_CPP/IDataStreamClientBase.h
+index 1df274f..df00735 100644
+--- a/Vicon/CrossMarket/DataStream/ViconDataStreamSDK_CPP/IDataStreamClientBase.h
++++ b/Vicon/CrossMarket/DataStream/ViconDataStreamSDK_CPP/IDataStreamClientBase.h
+@@ -420,6 +420,7 @@ namespace Result
+     TimecodeStandard::Enum Standard;
+     unsigned int           SubFramesPerFrame;
+     unsigned int           UserBits;
++    double                 PacketReceiptTime;
+   };
+ 
+   class Output_GetFrameRate
