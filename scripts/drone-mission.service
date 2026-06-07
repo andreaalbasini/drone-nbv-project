@@ -1,0 +1,15 @@
+[Unit]
+Description=Drone ROS2 Mission (DDS agent + offboard controller)
+After=network.target
+
+[Service]
+Type=forking
+User=lp10
+Environment=HOVER_Z=-2.0
+ExecStart=/home/lp10/ros2_ws_AA/scripts/drone_start.sh
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

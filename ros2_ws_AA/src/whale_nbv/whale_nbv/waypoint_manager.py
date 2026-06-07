@@ -28,7 +28,7 @@ class WaypointManager(Node):
             10
         )
 
-        # Lista waypoint: (x, y, z, yaw)
+        # Waypoint list: (x, y, z, yaw)
         self.waypoints = [
             (0.0, 0.0, -5.0, 0.0),
             (2.0, 0.0, -5.0, 0.0),
@@ -44,8 +44,8 @@ class WaypointManager(Node):
 
         self.timer = self.create_timer(0.5, self.timer_callback)
 
-        self.get_logger().info('Waypoint manager avviato.')
-        self.get_logger().info(f'Numero waypoint caricati: {len(self.waypoints)}')
+        self.get_logger().info('Waypoint manager started.')
+        self.get_logger().info(f'Number of waypoints loaded: {len(self.waypoints)}')
 
         self.publish_current_waypoint()
 
@@ -75,7 +75,7 @@ class WaypointManager(Node):
         self.last_goal_reached = False
 
         self.get_logger().info(
-            f'Waypoint pubblicato #{self.current_index}: '
+            f'Published waypoint #{self.current_index}: '
             f'x={x:.2f}, y={y:.2f}, z={z:.2f}, yaw={yaw:.2f}'
         )
 
@@ -88,7 +88,7 @@ class WaypointManager(Node):
 
         if self.last_goal_reached:
             self.get_logger().info(
-                f'Waypoint #{self.current_index} raggiunto.'
+                f'Waypoint #{self.current_index} reached.'
             )
 
             if self.current_index < len(self.waypoints) - 1:
@@ -96,7 +96,7 @@ class WaypointManager(Node):
                 self.publish_current_waypoint()
             else:
                 self.get_logger().info(
-                    'Ultimo waypoint raggiunto. Missione completata.'
+                    'Last waypoint reached. Mission complete.'
                 )
                 self.active = False
                 self.waiting_for_goal = False

@@ -11,7 +11,7 @@ def generate_launch_description():
     hover_z_arg = DeclareLaunchArgument(
         'hover_z',
         default_value='-10.0',
-        description='Quota iniziale di hover in NED (negativo = su)'
+        description='Initial hover altitude in NED (negative = up)'
     )
 
     hover_z = LaunchConfiguration('hover_z')

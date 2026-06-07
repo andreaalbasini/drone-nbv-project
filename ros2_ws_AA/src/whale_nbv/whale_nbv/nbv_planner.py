@@ -9,7 +9,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float32, String
 from geometry_msgs.msg import PoseStamped
 from px4_msgs.msg import VehicleOdometry
 
@@ -28,29 +28,34 @@ class NBVPlanner(Node):
         super().__init__('nbv_planner')
 
         # =====================================================
-        # PARAMETRI PRINCIPALI
+        # MAIN PARAMETERS
         # =====================================================
-        self.confidence_threshold = 0.90
+        self.declare_parameter('confidence_threshold', 0.70)
+        self.confidence_threshold = self.get_parameter('confidence_threshold').value
 
-        # step planner discreti
-        self.step_xy = 0.50
-        self.step_z_toward_plane = 0.50   # avvicinarsi al piano
-        self.min_altitude_above_plane = 3.0
+        # discrete planner steps
+        self.step_xy = 0.35
+        self.step_z_toward_plane = 0.25   # approach to plane (small = safe at low altitude)
+        self.min_altitude_above_plane = 0.3
 
-        # piano noto
+        # known plane — offset_d is updated with ground_z at the end of warmup
         self.plane_z = 0.0
         self.plane_normal_w = np.array([0.0, 0.0, 1.0], dtype=float)
         self.plane_offset_d = 0.0
 
-        # PRIMA (simulazione Gazebo)
+        # ground_z: NED altitude of the ground, estimated during warmup
+        self.ground_z = None
+        self.ground_z_samples = []
+
+        # BEFORE (Gazebo simulation)
         #self.image_width  = 640.0
         #self.image_height = 480.0
         #self.hfov         = 1.047  # ~60°
 
-        # DOPO (SIYI A8 reale)
+        # AFTER (real SIYI A8)
         self.image_width  = 1280.0
         self.image_height = 720.0
-        self.hfov         = 1.2217  # 70° in radianti - HFOV reale SIYI A8
+        self.hfov         = 1.2217  # 70° in radians - real SIYI A8 HFOV
 
         self.fx = 731.42
         self.fy = 734.86
@@ -59,7 +64,7 @@ class NBVPlanner(Node):
         self.K = make_camera_matrix(self.fx, self.fy, self.cx, self.cy)
 
 
-        # Simulazione
+        # Simulation
         #self.cx = self.image_width / 2.0
         #self.cy = self.image_height / 2.0
         #self.fx = self.image_width / (2.0 * math.tan(self.hfov / 2.0))
@@ -78,9 +83,12 @@ class NBVPlanner(Node):
         
         # REAL DRONE
         # extrinseca camera -> body
+        # camera-x (right in image) -> body -y (LEFT), camera-y (down in image) -> body +x (forward)
+        # Determined from flight observation: marker at u>cx moved MORE right when drone moved +y,
+        # proving image-right = body-left (camera rotated 90° CW around nadir axis vs. assumed).
         self.R_bc = np.array([
-            [0.0, 1.0,  0.0],
-            [-1.0,  0.0,  0.0],
+            [0.0,  1.0,  0.0],
+            [-1.0, 0.0,  0.0],
             [0.0,  0.0,  1.0],
         ], dtype=float)
 
@@ -91,7 +99,7 @@ class NBVPlanner(Node):
         self.has_odometry = False
         self.has_goal = False
 
-        # stato drone
+        # drone state
         self.current_x = 0.0
         self.current_y = 0.0
         self.current_z = -4.0
@@ -102,7 +110,7 @@ class NBVPlanner(Node):
 
         # Delay
         self.goal_reached_time_ns = 0
-        self.stabilization_delay_s = 0.2  # 
+        self.stabilization_delay_s = 1.0
 
         self.last_detection_time_ns = 0
 
@@ -111,18 +119,24 @@ class NBVPlanner(Node):
         self.current_goal_z = -4.0
         self.current_goal_yaw = 0.0
 
-        # stato target
+        # target state
         self.targets: Dict[int, dict] = {}
 
-        # evita di ripubblicare mentre il drone sta ancora eseguendo
+        # avoid re-publishing while the drone is still executing
         self.waiting_after_publish = False
 
         self.mission_complete_pub = self.create_publisher(Bool, '/whale_nbv/mission_complete', 10)
+        self.ground_z_pub = self.create_publisher(Float32, '/whale_nbv/ground_z', 10)
         self.mission_complete = False
 
-        # Dichiara il parametro con default -10.0 (NED: 10 metri su)
-        self.declare_parameter('hover_z', -10.0)
+        self.declare_parameter('hover_z', -3.0)
         self.hover_z = self.get_parameter('hover_z').value
+
+        # GPS warm-up: wait N seconds before sending the first goal
+        self.declare_parameter('gps_warmup_s', 20.0)
+        self.gps_warmup_s = self.get_parameter('gps_warmup_s').value
+        self.start_time_ns = None
+        self.last_warmup_log_s = -999.0
 
         # =====================================================
         # PUB/SUB
@@ -163,16 +177,16 @@ class NBVPlanner(Node):
 
         self.vehicle_odometry_sub = self.create_subscription(
             VehicleOdometry,
-            '/fmu/in/vehicle_visual_odometry',
+            '/fmu/out/vehicle_odometry',
             self.vehicle_odometry_callback,
             qos_profile
         )
 
         self.timer = self.create_timer(0.5, self.planning_loop)
 
-        self.get_logger().info('NBV planner avviato')
+        self.get_logger().info('NBV planner started')
         self.get_logger().info(f'Confidence threshold = {self.confidence_threshold:.2f}')
-        self.get_logger().info('Planner discreto con azioni XY + descend')
+        self.get_logger().info('Discrete planner with XY + descend actions')
 
     # =====================================================
     # CALLBACKS
@@ -189,7 +203,7 @@ class NBVPlanner(Node):
         try:
             detections = json.loads(msg.data)
         except Exception as e:
-            self.get_logger().error(f'Errore parsing detections_json: {e}')
+            self.get_logger().error(f'Error parsing detections_json: {e}')
             return
 
         now_ns = self.get_clock().now().nanoseconds
@@ -246,6 +260,11 @@ class NBVPlanner(Node):
         self.current_yaw = quaternion_to_yaw(qx, qy, qz, qw)
 
         self.has_odometry = True
+        if self.start_time_ns is None:
+            self.start_time_ns = self.get_clock().now().nanoseconds
+        # accumulate z samples until ground has been estimated
+        if self.ground_z is None:
+            self.ground_z_samples.append(self.current_z)
 
     # =====================================================
     # GEOMETRIA
@@ -274,13 +293,28 @@ class NBVPlanner(Node):
 
     def estimate_target_world_points(self) -> Dict[int, np.ndarray]:
         target_points = {}
+        _, t_wc = self.compute_camera_pose_in_world()
+        cam_z = t_wc[2]
 
         for marker_id, target in self.targets.items():
             u = float(target['center'][0])
             v = float(target['center'][1])
             point_w = self.intersect_pixel_with_plane_current_pose(u, v)
-            if point_w is not None:
-                target_points[marker_id] = point_w
+            if point_w is None:
+                continue
+
+            # Clamp z: the marker must lie between the camera and the ground.
+            # If it ends up above the camera (z < cam_z) or below ground (z > ground_z)
+            # we force z to ground_z — better an approximation than an impossible point.
+            if self.ground_z is not None:
+                if point_w[2] < cam_z or point_w[2] > self.ground_z:
+                    self.get_logger().warn(
+                        f'[target {marker_id}] estimated z ({point_w[2]:.2f}) out of range '
+                        f'[cam_z={cam_z:.2f}, ground_z={self.ground_z:.2f}] → clamped to ground_z'
+                    )
+                    point_w[2] = self.ground_z
+
+            target_points[marker_id] = point_w
 
         return target_points
 
@@ -357,7 +391,12 @@ class NBVPlanner(Node):
         cand_y = self.current_y + action['dy']
         cand_z = self.current_z + action['dz']
 
-        min_allowed_z = -self.min_altitude_above_plane
+        # in NED: ground_z is positive (e.g. +9.77), climbing = decreasing z
+        # min_altitude_above_plane = 2m → do not descend below (ground_z - 2.0)
+        if self.ground_z is not None:
+            min_allowed_z = self.ground_z - self.min_altitude_above_plane
+        else:
+            min_allowed_z = -self.min_altitude_above_plane
         if cand_z > min_allowed_z:
             cand_z = min_allowed_z
 
@@ -368,7 +407,9 @@ class NBVPlanner(Node):
     def predict_marker_pixel_size(self, drone_pos, marker_world_pos, marker_real_size=0.5):
         dx = drone_pos[0] - marker_world_pos[0]
         dy = drone_pos[1] - marker_world_pos[1]
-        dz = abs(drone_pos[2])  # quota in NED
+        # Camera altitude (camera is t_bc[2]=0.15m lower than body in NED)
+        cam_z = drone_pos[2] + self.t_bc[2]
+        dz = max(self.ground_z - cam_z, 0.1) if self.ground_z is not None else max(abs(cam_z), 0.1)
 
         # distanza 3D dalla camera al marker
         dist_3d = math.sqrt(dx**2 + dy**2 + dz**2)
@@ -387,26 +428,40 @@ class NBVPlanner(Node):
     def predict_marker_center_score(self, candidate_pose, marker_world_pos):
         cand_x, cand_y, cand_z, cand_yaw = candidate_pose
 
-        # vettore drone -> marker nel frame mondo
-        dx = marker_world_pos[0] - cand_x
-        dy = marker_world_pos[1] - cand_y
-        dz = -cand_z  # NED: z negativo = su, il marker è sotto
+        # Camera position in world (t_bc offset rotated by yaw)
+        cos_y = math.cos(cand_yaw)
+        sin_y = math.sin(cand_yaw)
+        cam_x = cand_x + cos_y * self.t_bc[0] - sin_y * self.t_bc[1]
+        cam_y = cand_y + sin_y * self.t_bc[0] + cos_y * self.t_bc[1]
+        cam_z = cand_z + self.t_bc[2]
 
-        # proiezione in pixel con camera nadir (semplificata)
-        # assumendo R_bc fissa e yaw piccolo
-        u = self.cx + self.fx * (dx / max(dz, 0.1))
-        v = self.cy + self.fy * (dy / max(dz, 0.1))
+        # Vector camera -> marker in world frame
+        dx = marker_world_pos[0] - cam_x
+        dy = marker_world_pos[1] - cam_y
+        dz = max(self.ground_z - cam_z, 0.1) if self.ground_z is not None else max(abs(cam_z), 0.1)
 
-        # center score: quanto è vicino al centro immagine
+        # Rotate into body frame (yaw-aware): body_x = dx*cos+dy*sin, body_y = -dx*sin+dy*cos
+        dx_body = dx * cos_y + dy * sin_y
+        dy_body = -dx * sin_y + dy * cos_y
+
+        # Applica R_bc^T: con R_bc=[[0,1,0],[-1,0,0],[0,0,1]] → R_bc^T=[[0,-1,0],[1,0,0],[0,0,1]]
+        # cam_x = -body_y (image right = body LEFT), cam_y = +body_x (image down = body forward)
+        p_cam_x = -dy_body
+        p_cam_y =  dx_body
+
+        u = self.cx + self.fx * (p_cam_x / max(dz, 0.1))
+        v = self.cy + self.fy * (p_cam_y / max(dz, 0.1))
+
+        # center score: how close to the image center
         cx_img = self.image_width / 2.0
         cy_img = self.image_height / 2.0
         dist = math.sqrt((u - cx_img)**2 + (v - cy_img)**2)
         dist_max = math.sqrt(cx_img**2 + cy_img**2)
         center_score = max(0.0, 1.0 - dist / dist_max)
 
-        # se fuori immagine, confidence zero
+        # if outside image, confidence zero
         if u < 0 or u > self.image_width or v < 0 or v > self.image_height:
-            return 0.0, False  # non visibile
+            return 0.0, False
 
         return center_score, True
 
@@ -417,27 +472,27 @@ class NBVPlanner(Node):
 
         cand_x, cand_y, cand_z, _ = candidate_pose
 
-        # size score predetto geometricamente
+        # size score predicted geometrically
         size_score = self.predict_marker_pixel_size(
             (cand_x, cand_y, cand_z),
             target_point_w,
-            marker_real_size=0.5  # dimensione reale del marker in metri
+            marker_real_size=0.5  # real marker size in metres
         )
 
-        # center score predetto geometricamente
+        # center score predicted geometrically
         center_score, visible = self.predict_marker_center_score(
             candidate_pose,
             target_point_w
         )
 
         if not visible:
-            return 0.0  # marker fuori campo: confidence zero, non andare lì
+            return 0.0  # marker out of field of view: confidence zero, do not go there
 
-        # shape e border sono quasi sempre buoni se il marker è visibile
-        # li teniamo fissi al valore attuale come stima conservativa
+        # shape and border are almost always good if the marker is visible
+        # we keep them fixed at the current value as a conservative estimate
         current = self.targets[marker_id]
         shape_score = float(current.get('shape_score', 0.8))
-        border_score = min(1.0, center_score * 1.5)  # se è centrato, è anche lontano dai bordi
+        border_score = min(1.0, center_score * 1.5)  # if centred, it is also far from the edges
 
         predicted = (
             0.50 * size_score +
@@ -591,6 +646,14 @@ class NBVPlanner(Node):
     # =====================================================
 
     def planning_loop(self):
+        try:
+            self._planning_loop_impl()
+        except Exception as e:
+            self.get_logger().error(f'[planning_loop] UNHANDLED EXCEPTION: {e}', throttle_duration_sec=5.0)
+            import traceback
+            self.get_logger().error(traceback.format_exc(), throttle_duration_sec=5.0)
+
+    def _planning_loop_impl(self):
         if not self.has_odometry:
             self.get_logger().debug('NBV: waiting odometry...')
             return
@@ -600,10 +663,34 @@ class NBVPlanner(Node):
         #    return
 
         if not self.has_goal and self.has_odometry:
+            elapsed_s = (self.get_clock().now().nanoseconds - self.start_time_ns) / 1e9
+            if elapsed_s < self.gps_warmup_s:
+                if elapsed_s - self.last_warmup_log_s >= 5.0:
+                    self.get_logger().info(
+                        f'GPS warm-up: {self.gps_warmup_s - elapsed_s:.0f}s remaining before takeoff '
+                        f'(current pos: {self.current_x:.2f}, {self.current_y:.2f}, z={self.current_z:.2f})'
+                    )
+                    self.last_warmup_log_s = elapsed_s
+                return
+            # end of warmup: estimate ground_z from samples collected on the ground
+            if self.ground_z is None:
+                # Use only the last 100 samples (~5s at 20Hz) to avoid stale early GPS readings
+                recent = self.ground_z_samples[-100:] if len(self.ground_z_samples) >= 100 else self.ground_z_samples
+                self.ground_z = float(np.mean(recent)) if recent else self.current_z
+                self.plane_offset_d = -self.ground_z  # plane eq: n·X+d=0 → z=-d → d=-ground_z
+                self.plane_z = self.ground_z
+                self.get_logger().info(
+                    f'Estimated ground z: {self.ground_z:.2f}m NED '
+                    f'(mean over last {len(recent)} samples / {len(self.ground_z_samples)} total)'
+                )
+                self.ground_z_pub.publish(Float32(data=self.ground_z))
+            # hover_z is a RELATIVE offset from the ground (negative = up in NED)
+            hover_goal_z = self.ground_z + self.hover_z
             self.get_logger().info(
-                f'Primo hover autonomo: (0.0, 0.0, {self.hover_z})'
+                f'First autonomous hover: ({self.current_x:.2f}, {self.current_y:.2f}, {hover_goal_z:.2f}) '
+                f'[ground={self.ground_z:.2f} + offset={self.hover_z:.2f}], yaw={self.current_yaw:.2f}'
             )
-            self.publish_goal(0.0, 0.0, self.hover_z, 0.0)
+            self.publish_goal(self.current_x, self.current_y, hover_goal_z, self.current_yaw)
             return
 
         if self.waiting_after_publish:
@@ -616,9 +703,9 @@ class NBVPlanner(Node):
         if elapsed_s < self.stabilization_delay_s:
             return
 
-        # aspetta una detection arrivata DOPO il goal_reached
+        # wait for a detection that arrived AFTER goal_reached
         if self.last_detection_time_ns < self.goal_reached_time_ns:
-            return  # ancora nessuna detection fresca    
+            return  # no fresh detection yet
 
         self.get_logger().info('==================================================')
         self.get_logger().info(
@@ -627,7 +714,7 @@ class NBVPlanner(Node):
         )
 
         if len(self.targets) == 0:
-            self.get_logger().warn('NBV: nessun marker rilevato. Mantengo hover.')
+            self.get_logger().warn('NBV: no marker detected. Maintaining hover.')
             return
 
         for marker_id, target in self.targets.items():
@@ -647,7 +734,7 @@ class NBVPlanner(Node):
         target_points_world = self.estimate_target_world_points()
 
         if len(target_points_world) == 0:
-            self.get_logger().warn('NBV: impossibile stimare punti target sul piano. Nessuna azione.')
+            self.get_logger().warn('NBV: unable to estimate target points on the plane. No action.')
             return
 
         for marker_id, point_w in target_points_world.items():
@@ -664,7 +751,7 @@ class NBVPlanner(Node):
 
         best = self.choose_best_action(target_points_world)
         if best is None:
-            self.get_logger().warn('NBV: nessuna azione valida trovata.')
+            self.get_logger().warn('NBV: no valid action found.')
             return
 
         best_action = best['action']

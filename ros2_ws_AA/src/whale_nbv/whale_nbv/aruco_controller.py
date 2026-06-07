@@ -336,7 +336,7 @@ class ArucoController(Node):
             return
 
         if not self.aruco_detected:
-            self.get_logger().info('Goal reached but marker non relieved: waiting...')
+            self.get_logger().info('Goal reached but marker not detected: waiting...')
             return
 
         if self.waiting_after_command:

@@ -2,7 +2,7 @@
 set -e
 
 if docker ps -a --format '{{.Names}}' | grep -qx ros2_px4; then
-  echo "Container ros2_px4 gia presente."
+  echo "Container ros2_px4 already present."
   exit 0
 fi
 
@@ -14,4 +14,4 @@ docker run -d \
   osrf/ros:humble-desktop \
   tail -f /dev/null
 
-echo "Container ros2_px4 creato."
+echo "Container ros2_px4 created."

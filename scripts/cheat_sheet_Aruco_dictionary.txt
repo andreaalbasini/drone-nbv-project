@@ -1,0 +1,40 @@
+In one terminal capture a frame from the camera
+
+python3 -c "
+import cv2
+cap = cv2.VideoCapture('rtsp://192.168.144.25:8554/main.264', cv2.CAP_FFMPEG)
+ret, frame = cap.read()
+if ret:
+    cv2.imwrite('/tmp/test_aruco.jpg', frame)
+    print('Saved /tmp/test_aruco.jpg')
+cap.release()
+"
+
+
+In another terminal verify which dictionary it is:
+
+python3 -c "
+import cv2
+import numpy as np
+
+frame = cv2.imread('/tmp/test_aruco.jpg')
+gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+dictionaries = {
+    '4X4_50': cv2.aruco.DICT_4X4_50,
+    '4X4_100': cv2.aruco.DICT_4X4_100,
+    '5X5_50': cv2.aruco.DICT_5X5_50,
+    '6X6_50': cv2.aruco.DICT_6X6_50,
+    'ARUCO_ORIGINAL': cv2.aruco.DICT_ARUCO_ORIGINAL,
+}
+
+params = cv2.aruco.DetectorParameters_create()
+
+for name, d in dictionaries.items():
+    aruco_dict = cv2.aruco.getPredefinedDictionary(d)
+    corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=params)
+    if ids is not None:
+        print(f'FOUND with {name}: ids={ids.flatten().tolist()}')
+    else:
+        print(f'Not found with {name}')
+"

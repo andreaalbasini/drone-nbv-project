@@ -20,11 +20,25 @@ class ArucoDetectorNode(Node):
 
         self.bridge = CvBridge()
         self.latest_frame = None
-        cv2.startWindowThread()
-        # Stato detection più recente
+        self.show_debug_window = bool(os.environ.get('DISPLAY', '').strip())
+        if self.show_debug_window:
+            try:
+                cv2.startWindowThread()
+            except Exception:
+                self.show_debug_window = False
+        # Most recent detection state
         self.latest_detections = []
         self.latest_detected = False
         self.last_ids_for_log = None
+
+        # Sticky detection: keeps the last valid detection for N seconds
+        # so the NBV planner does not lose the marker when it flickers
+        self.sticky_detections = []
+        self.sticky_detected = False
+        self.last_detected_ns = 0
+        self.sticky_timeout_ns = int(1.5 * 1e9)  # 1.5s persistence
+
+        # Photo only on goal_reached (no continuous automatic saving)
 
         image_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -45,7 +59,14 @@ class ArucoDetectorNode(Node):
             self.goal_reached_callback,
             10
         )
+        self.mission_complete_sub = self.create_subscription(
+            Bool,
+            '/whale_nbv/mission_complete',
+            self.mission_complete_callback,
+            10
+        )
         self.last_goal_reached_state = False
+        self.mission_complete_photo_taken = False
         self.photo_counter = 0
 
         # Output multi-marker
@@ -60,19 +81,30 @@ class ArucoDetectorNode(Node):
         
         
 
-        self.get_logger().info('Aruco detector ready')
+        # ArUco dictionary selectable via ROS parameter:
+        #   aruco_dict:=APRILTAG_36h11   (default, markers printed with plastic lamination)
+        #   aruco_dict:=4X4_50           (markers reprinted without plastic lamination)
+        self.declare_parameter('aruco_dict', '4X4_50')
+        dict_name = self.get_parameter('aruco_dict').get_parameter_value().string_value
+        dict_map = {
+            'APRILTAG_36h11': cv2.aruco.DICT_APRILTAG_36h11,
+            '4X4_50':         cv2.aruco.DICT_4X4_50,
+            '4X4_100':        cv2.aruco.DICT_4X4_100,
+            '6X6_250':        cv2.aruco.DICT_6X6_250,
+        }
+        dict_id = dict_map.get(dict_name, cv2.aruco.DICT_APRILTAG_36h11)
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(dict_id)
+
+        self.get_logger().info(f'Aruco detector ready — dictionary: {dict_name}')
         self.get_logger().info('Multi-marker mode enabled')
         self.get_logger().info('Publishing detections at 2 Hz')
-        self.get_logger().info('Detailed confidence debug enabled')
-
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11) #DICT_4X4_50
 
         if hasattr(cv2.aruco, 'DetectorParameters'):
             self.aruco_params = cv2.aruco.DetectorParameters()
         else:
             self.aruco_params = cv2.aruco.DetectorParameters_create()
 
-        # Parametri utili per detection più stabile
+        # Useful parameters for more stable detection
         if hasattr(self.aruco_params, 'cornerRefinementMethod'):
             self.aruco_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
 
@@ -93,7 +125,7 @@ class ArucoDetectorNode(Node):
         else:
             self.detector = None
 
-        # Pubblicazione lenta
+        # Slow publication
         self.publish_period_s = 0.5  # 2 Hz
         self.publish_timer = self.create_timer(self.publish_period_s, self.publish_timer_callback)
 
@@ -111,22 +143,25 @@ class ArucoDetectorNode(Node):
         self.get_logger().error(f'Error image conversion: {e}')
 
     def goal_reached_callback(self, msg: Bool):
-    # Scatta solo sul fronte di salita (False -> True), non ad ogni tick
+        # Fires only on rising edge (False→True), never during manual guidance
         if msg.data and not self.last_goal_reached_state:
             self.save_waypoint_photo()
         self.last_goal_reached_state = msg.data
 
-    def save_waypoint_photo(self):
+    def mission_complete_callback(self, msg: Bool):
+        if msg.data and not self.mission_complete_photo_taken:
+            self.mission_complete_photo_taken = True
+            self.save_waypoint_photo(label_prefix='MISSION_COMPLETE')
+
+    def save_waypoint_photo(self, label_prefix='waypoint'):
+        import datetime
         if self.latest_frame is None:
-            self.get_logger().warn('Photo trigger: no frame available')
+            self.get_logger().warn('[PHOTO] No frame available')
             return
 
-        frame = self.latest_frame.copy()
-        
-        # Annota il frame con i dati di detection correnti
-        annotated = frame.copy()
+        annotated = self.latest_frame.copy()
         for det in self.latest_detections:
-            bbox = det['bbox']  # [min_x, min_y, max_x, max_y]
+            bbox = det['bbox']
             cv2.rectangle(annotated,
                 (int(bbox[0]), int(bbox[1])),
                 (int(bbox[2]), int(bbox[3])),
@@ -136,11 +171,15 @@ class ArucoDetectorNode(Node):
                 (int(bbox[0]), int(bbox[1]) - 8),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-        filename = f'waypoint_{self.photo_counter:04d}.jpg'
+        ts = datetime.datetime.now().strftime('%H%M%S')
+        filename = f'{label_prefix}_{self.photo_counter:04d}_{ts}.jpg'
         path = os.path.join(self.output_dir, filename)
         cv2.imwrite(path, annotated)
         self.photo_counter += 1
-        self.get_logger().info(f'Photo saved: {path} | markers={[d["id"] for d in self.latest_detections]}')
+        ids = [d['id'] for d in self.latest_detections]
+        self.get_logger().info(
+            f'[PHOTO] {filename} saved | markers={ids}'
+        )
 
     # =========================================================
     # DETECTION
@@ -232,20 +271,30 @@ class ArucoDetectorNode(Node):
         frame = self.latest_frame
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Gamma correction per migliorare contrasto su asfalto scuro
-        gamma = 0.5
-        lut = np.array([((i / 255.0) ** gamma) * 255 for i in range(256)], dtype='uint8')
-        frame_gray = cv2.LUT(frame_gray, lut)
+        # Adaptive gamma: normalizes brightness before any other processing.
+        # If the frame is very dark or very bright (sun/shadow), gamma corrects it
+        # toward a target of 128 (medium) before CLAHE works on local contrast.
+        mean_val = float(np.mean(frame_gray))
+        if mean_val > 5.0:
+            gamma = math.log(128.0) / math.log(mean_val)
+            gamma = max(0.4, min(2.5, gamma))
+            inv_gamma = 1.0 / gamma
+            lut = np.array([int((i / 255.0) ** inv_gamma * 255)
+                            for i in range(256)], dtype=np.uint8)
+            frame_gray = cv2.LUT(frame_gray, lut)
 
+        # CLAHE for local contrast (small tiles = better for distant markers)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+        frame_gray = clahe.apply(frame_gray)
         corners, ids = self.detect_markers(frame_gray)
         
-        debug_frame = frame.copy()
-        if ids is not None and len(ids) > 0:
-             cv2.aruco.drawDetectedMarkers(debug_frame, corners, ids)
-        cv2.imshow("ArUco Debug (undistorted)", cv2.resize(debug_frame, (960, 540)))
-        cv2.waitKey(1)        
-        
-        
+        if self.show_debug_window:
+            debug_frame = frame.copy()
+            if ids is not None and len(ids) > 0:
+                cv2.aruco.drawDetectedMarkers(debug_frame, corners, ids)
+            cv2.imshow("ArUco Debug (undistorted)", cv2.resize(debug_frame, (960, 540)))
+            cv2.waitKey(1)
+
         if ids is None or len(ids) == 0:
             self.latest_detections = []
             self.latest_detected = False
@@ -297,26 +346,37 @@ class ArucoDetectorNode(Node):
         self.latest_detections = detections
         self.latest_detected = True
 
+        # update sticky: every time we detect something, save timestamp
+        self.sticky_detections = detections
+        self.sticky_detected = True
+        self.last_detected_ns = self.get_clock().now().nanoseconds
+
     # =========================================================
     # PUBLISH + DEBUG LOG
     # =========================================================
 
     def publish_timer_callback(self):
-        self.detected_pub.publish(Bool(data=self.latest_detected))
+        # use sticky detection: if the marker was seen recently, keep it
+        now_ns = self.get_clock().now().nanoseconds
+        sticky_alive = (self.sticky_detected and
+                        (now_ns - self.last_detected_ns) < self.sticky_timeout_ns)
+
+        publish_detections = self.sticky_detections if sticky_alive else self.latest_detections
+        publish_detected = sticky_alive or self.latest_detected
+
+        self.detected_pub.publish(Bool(data=publish_detected))
 
         json_msg = String()
-        json_msg.data = json.dumps(self.latest_detections)
+        json_msg.data = json.dumps(publish_detections)
         self.detections_json_pub.publish(json_msg)
 
-        detected_ids = [d["id"] for d in self.latest_detections]
+        detected_ids = [d["id"] for d in publish_detections]
+        sticky_label = '[STICKY]' if (sticky_alive and not self.latest_detected) else ''
         self.get_logger().info(
-            f'Published {len(self.latest_detections)} marker(s): ids={detected_ids}'
+            f'Published {len(publish_detections)} marker(s): ids={detected_ids} {sticky_label}'
         )
 
-        if len(self.latest_detections) == 0:
-            return
-
-        for det in self.latest_detections:
+        for det in publish_detections:
             self.get_logger().info(
                 f"[MARKER {det['id']}] "
                 f"center=({det['center'][0]:.1f}, {det['center'][1]:.1f}) | "
@@ -330,6 +390,7 @@ class ArucoDetectorNode(Node):
                 f"shape={det['shape_score']:.3f} | "
                 f"border={det['border_score']:.3f}"
             )
+
 
 
 def main(args=None):
