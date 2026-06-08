@@ -1,6 +1,10 @@
 ros2_ws_AA/build/
 ros2_ws_AA/install/
 ros2_ws_AA/log/
+build/
+install/
+log/
+aruco_output/
 __pycache__/
 *.pyc
 calibration_data/*.jpg

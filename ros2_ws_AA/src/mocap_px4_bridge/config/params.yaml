@@ -1,4 +1,0 @@
-/mocap_px4_bridge:
-  ros__parameters:
-    mocap_topic: /Drone_Whale/world
-    px4_topic: /fmu/in/vehicle_visual_odometry
