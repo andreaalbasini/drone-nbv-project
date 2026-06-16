@@ -17,7 +17,6 @@ ros2_ws_AA/src/
 └── whale_nbv_cpp/      # Gazebo camera bridge (simulation only, not needed on real drone)
 
 calibration_data/       # SIYI A8 calibration images and results (K matrix, distortion)
-plots/                  # Flight trajectory and confidence plots from real test flights
 scripts/
 └── plot_flight_logs.py # Generates flight plots from ROS2 node logs (no rosbag needed)
 ```
@@ -39,11 +38,7 @@ NBV Planner ──► computes next waypoint ──► /whale_nbv/goal_pose
       └──────────────────── Offboard Controller ──► PX4 (TrajectorySetpoint, offboard mode)
 ```
 
-**ArUco Detector** processes each frame with adaptive gamma correction and CLAHE, then computes a confidence score per marker:
-
-```
-confidence = 0.50 × size_score + 0.20 × center_score + 0.20 × shape_score + 0.10 × border_score
-```
+**ArUco Detector** processes each frame and computes a confidence score per marker based on size, centring, shape regularity, and border clearance.
 
 **NBV Planner** reads the detections and vehicle odometry, then publishes the next 3D waypoint using a ray–plane intersection strategy: the marker's pixel position is projected through the calibrated camera model onto the ground plane to estimate marker position, and the drone moves to improve coverage and confidence.
 
@@ -87,19 +82,7 @@ source install/setup.bash
 
 ## Running on the drone
 
-### 1. Start the camera
-
-```bash
-ros2 run camera siyi_node
-```
-
-Verify the stream is live:
-
-```bash
-ros2 topic hz /camera/image_raw
-```
-
-### 2. Launch the full mission
+Everything starts together at drone boot. The companion computer launches the camera driver and the full mission stack in a single command:
 
 ```bash
 ros2 launch whale_nbv mission.launch.py \
@@ -126,59 +109,6 @@ The drone will:
 
 Photos are saved to `~/aruco_output/` with filenames `waypoint_NNNN_HHMMSS.jpg`.
 
-### 3. Arm and switch to offboard (RC)
+### Arm and switch to offboard (RC)
 
 The offboard controller requires the drone to be **armed** and switched to **Offboard mode** via the RC transmitter (or QGroundControl) before it takes control. The node starts publishing setpoints immediately so PX4 can accept the offboard switch.
-
----
-
-## Camera calibration
-
-Calibration was performed with 38 checkerboard images. Results are in `calibration_data/calibration_results.txt`.
-
-```
-Reprojection error : 0.159 px
-fx = 731.42   fy = 734.86
-cx = 644.71   cy = 364.32
-```
-
-The camera matrix is hard-coded in `nbv_planner.py` and used for ray–plane intersection.
-
----
-
-## Flight plots
-
-Pre-generated plots from the Jun 7 real flights are in `plots/`:
-
-| File | Session |
-|------|---------|
-| `flight_3d_1aruco.png` | 16:02 — 1 marker (ID 0), threshold 0.70 |
-| `flight_xy_1aruco.png` | 16:02 — top-down view |
-| `flight_zy_1aruco.png` | 16:02 — altitude vs Y |
-| `flight_confidence_1aruco.png` | 16:02 — confidence over time |
-| `flight_3d_2aruco.png` | 16:36 — 2 markers (ID 0+1), threshold 0.50 |
-| `flight_xy_2aruco.png` | 16:36 — top-down view |
-| `flight_zy_2aruco.png` | 16:36 — altitude vs Y |
-| `flight_confidence_2aruco.png` | 16:36 — confidence over time |
-
-To regenerate the plots from the ROS2 node logs:
-
-```bash
-python3 scripts/plot_flight_logs.py
-```
-
----
-
-## ROS2 topics
-
-| Topic | Type | Description |
-|-------|------|-------------|
-| `/camera/image_raw` | `sensor_msgs/Image` | Raw camera feed |
-| `/aruco/detected` | `std_msgs/Bool` | True if any marker is currently detected |
-| `/aruco/detections_json` | `std_msgs/String` | JSON array with per-marker detection details |
-| `/whale_nbv/goal_pose` | `geometry_msgs/PoseStamped` | Next waypoint (NED) from NBV planner |
-| `/whale_nbv/goal_reached` | `std_msgs/Bool` | True when drone is within tolerance of current goal |
-| `/whale_nbv/mission_complete` | `std_msgs/Bool` | True when all markers acquired |
-| `/fmu/in/offboard_control_mode` | `px4_msgs/OffboardControlMode` | Keeps PX4 in offboard mode |
-| `/fmu/in/trajectory_setpoint` | `px4_msgs/TrajectorySetpoint` | Position setpoint sent to PX4 |
-| `/fmu/out/vehicle_odometry` | `px4_msgs/VehicleOdometry` | Vehicle pose and velocity from EKF2 |
